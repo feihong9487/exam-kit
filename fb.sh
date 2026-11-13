@@ -293,6 +293,39 @@ split_blocks() {   # 把貼上的回覆拆成程式碼區塊：$1/b<n>.lang .inf
     line ~ /驗收/ { tag="verify" }
     END { print n > (D "/count"); if (inb) print n > (D "/unclosed") }' "$1/in.txt"
 }
+unfenced_code() {   # 回覆裡沒有 ``` 時自己找程式碼 → $1/b1.*：C 取 #include（或 main）到最後一個 }；Python 取第一行程式起、從尾端刪到能編譯
+  python3 - "$1" <<'FB_PYUNF'
+import re, sys
+D = sys.argv[1]
+L = open(D + "/in.txt", encoding="utf-8", errors="replace").read().replace("\r", "").split("\n")
+def save(lang, body):
+    for k, v in (("lang", lang), ("info", lang), ("prev", ""), ("tag", "")):
+        open(D + "/b1." + k, "w", encoding="utf-8").write(v + "\n")
+    open(D + "/b1.body", "w", encoding="utf-8").write("\n".join(body).rstrip("\n") + "\n")
+    open(D + "/count", "w").write("1\n"); sys.exit(0)
+cjk = re.compile(r"[　-〿一-鿿＀-￯]")
+s = next((i for i, l in enumerate(L) if re.match(r"\s*#\s*include\b", l)), None)
+if s is None: s = next((i for i, l in enumerate(L) if re.match(r"\s*(int|void)\s+main\s*\(", l)), None)
+if s is not None:
+    e = max((i for i in range(s, len(L)) if re.match(r"\s*}\s*;?\s*$", L[i])), default=None)
+    if e is not None: save("c", L[s:e + 1])
+s = next((i for i, l in enumerate(L) if re.match(r"(import\s+\w|from\s+[\w.]+\s+import\s|def\s+\w+\s*\(|class\s+\w+|#!\s*/)", l)), None)
+if s is None:
+    def codey(l):
+        if cjk.search(l) or not re.search(r"[(=]|:\s*$", l): return False
+        try: compile(l.strip() if not l.rstrip().endswith(":") else l.strip() + "\n pass", "x", "exec"); return True
+        except SyntaxError: return False
+    s = next((i for i, l in enumerate(L) if codey(l)), None)
+if s is not None:
+    body = L[s:]
+    for _ in range(30):
+        while body and not body[-1].strip(): body.pop()
+        if not body: break
+        try: compile("\n".join(body) + "\n", "main.py", "exec"); save("python", body)
+        except SyntaxError: body.pop()
+sys.exit(1)
+FB_PYUNF
+}
 fix_verify() {   # 驗收腳本有 grab 卻沒有 show（小模型常忘）→ 自動補在最後，否則永遠「缺少的行」
   [ -s verify.sh ] || return 0
   # 把 service 當 topic 用（send /x pkg/srv/T …）→ 改成 call，並刪掉對同名稱的 grab／show
@@ -458,6 +491,9 @@ if [ -t 0 ] && trap "stty icanon 2>/dev/null" EXIT INT && stty -icanon 2>/dev/nu
 else IN=$(cat); fi
 [ -n "$IN" ] || { echo "沒有貼到任何東西" >&2; exit 1; }
 T=$(mktemp -d); printf '%s\n' "$IN" > "$T/in.txt"; split_blocks "$T"; NB=$(cat "$T/count")
+if [ "$NB" -eq 0 ] && [[ "$STAGE" =~ ^(write|fix)$ ]] && unfenced_code "$T"; then   # 從網頁「反白複製」時 ``` 會不見
+  NB=1; echo "ℹ️ 回覆裡沒有 \`\`\` 區塊（多半是用滑鼠反白複製時不見了），fb 已自己找出程式碼。下次可改按 AI 回答下方的「複製」按鈕。" >&2
+fi
 
 case "$STAGE" in
   start)
