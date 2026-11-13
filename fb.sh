@@ -14,6 +14,20 @@
 # 需要同資料夾或 fb.sh 旁邊有 packs.txt（30 個情境包）。每一題建議用一個新資料夾。
 SELF="$(readlink -f "$0")"; HERE="$(dirname "$SELF")"
 PACKS="${PACKS:-$HERE/packs.txt}"; [ -f "$PACKS" ] || PACKS="./packs.txt"
+# 「要貼給 AI 的內容」同時存成 .fb_prompt.txt，並試著直接放進剪貼簿（終端機支援 OSC 52 才有效，不支援也沒有副作用）。FB_COPY=0 可關
+if [ -z "$FB_WRAPPED" ] && [ -t 1 ] && [ "${FB_COPY:-1}" = 1 ] && command -v tee >/dev/null 2>&1; then
+  case "${1:-}" in ""|test|task|ci|mode)
+    export FB_WRAPPED=1; rm -f .fb_prompt.txt
+    bash "$SELF" "$@" | tee .fb_prompt.txt; FBRC=${PIPESTATUS[0]}
+    if [ -s .fb_prompt.txt ] && [ "$(wc -c < .fb_prompt.txt)" -gt 200 ]; then
+      if [ "$(wc -c < .fb_prompt.txt)" -lt 60000 ] && command -v base64 >/dev/null 2>&1; then
+        printf '\033]52;c;%s\a' "$(base64 < .fb_prompt.txt | tr -d '\n')" > /dev/tty 2>/dev/null
+      fi
+      echo "📋 上面「--------」以下那一段（共 $(wc -l < .fb_prompt.txt) 行）已經存成 $(pwd)/.fb_prompt.txt，也試著直接放進剪貼簿了：先到 AI 網頁按 Ctrl+V 試試；貼出來的不是這一段，才回來用滑鼠選取複製（或用文字編輯器開那個檔，全選複製）。" >&2
+    else rm -f .fb_prompt.txt; fi
+    exit "$FBRC" ;;
+  esac
+fi
 if [ -z "$TO" ] && [ -f problem.txt ]; then   # 考生忘了 TO=1：題目寫「時間限制 1 秒」就自動用 1 秒
   TO=$(grep -oE '(時間限制|[Tt]ime [Ll]imit)[^0-9]{0,12}[0-9]+(\.[0-9]+)? ?(秒|s|sec)' problem.txt | grep -oE '[0-9]+(\.[0-9]+)?' | head -1)
 fi
@@ -757,7 +771,7 @@ case "$1" in
          echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
-         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_restarts .fb_bestall .fb_bestall_score .fb_full.txt .fb_chunk .fb_digest.txt .fb_dg_i brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
+         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_restarts .fb_bestall .fb_bestall_score .fb_full.txt .fb_chunk .fb_digest.txt .fb_dg_i .fb_prompt.txt brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
            [ -e "$f" ] && mv "$f" "$B/"; done
          if [ -d .fb_bak ]; then cp -r .fb_bak/. . && echo "（已還原考場原本的檔案：$(ls -A .fb_bak | tr '\n' ' ')）"; rm -rf .fb_bak; fi
          echo "已清空（舊檔在 $B）。開始新的一題：fb 然後貼上題目"; exit 0 ;;
