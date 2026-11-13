@@ -690,7 +690,7 @@ case "$1" in
          for f in main.c main.cpp main.py; do [ -f "$f" ] && exec bash "$SELF" check "$f"; done
          echo "還沒有程式"; exit 1 ;;
   pack)  get_pack "$2" && { echo "$2" > .pack_manual; echo "已換成情境 $2（之後每一輪都會附這個包，不會被 AI 選的蓋掉）"; } || echo "packs.txt 裡沒有 $2"; exit 0 ;;
-  skip)  [ "$(cat .stage 2>/dev/null)" = brute ] && { echo done > .stage; echo "已略過對拍，這題算完成。下一題：fb reset"; } || echo "現在不在對拍階段"; exit 0 ;;
+  skip)  echo done > .stage; echo "已標記這一題完成（略過剩下的步驟）。下一題：cd 到下一題的資料夾，或 fb reset"; exit 0 ;;
   io)    case "$2" in   # 題目不是 stdin/stdout：fb io argv（檔名當命令列參數）／fb io in input.txt（從檔案讀）／fb io out output.txt（寫到檔案）／fb io std（還原）
            argv) grep -v '^IO_ARGV=' .fb_io 2>/dev/null > .fb_io.t; echo "IO_ARGV=1" >> .fb_io.t; mv .fb_io.t .fb_io ;;
            in)   grep -v '^IO_IN=' .fb_io 2>/dev/null > .fb_io.t; echo "IO_IN=${3:-input.txt}" >> .fb_io.t; mv .fb_io.t .fb_io ;;
@@ -935,6 +935,13 @@ FB_PYPROT
       echo "⚠️ 這次貼的程式和上一次一模一樣：可能複製到舊的回答（AI 網頁要等新回答出來再按複製），或 AI 沒有改。照樣把下面整段貼給 AI。" >&2
       NOTE="（你上一次給的程式和【目前程式】一模一樣，完全沒有修改。這次一定要針對回報的錯誤實際修改程式。）"
     fi
+    if printf '%s' "$OUT" | grep -q '【只能用 CI 驗證】'; then   # 本機編不了／跑不了（Pico 韌體、缺 SDK）：寫入檔案後直接交卷，用 GitLab 評分當測試
+      echo fix > .stage; rm -f .fb_att_best .fb_att_fix .fb_sig .fb_n
+      printf '%s\n' "$OUT" | grep -E '^⚠️|^✅' >&2
+      echo "👉 程式已寫入 $SF。這題沒辦法在這台電腦測試：現在直接打 fb submit 交出去，用 GitLab 的評分當測試。" >&2
+      echo "   綠勾＝完成（打 fb skip 收工）；紅叉＝照步驟 5-2 複製 job 的 log，打 fb ci 貼上，再把它印出的內容貼給 AI。" >&2
+      rm -rf "$T"; exit 0
+    fi
     if [ "$MODE" != ros ] && ! printf '%s' "$OUT" | grep -q '全部通過'; then   # 只前進不後退：新版本通過的測資比之前少，就換回之前最好的版本再請 AI 改
       # 分數＝通過的測資組數 ×10000 ＋ 第一筆失敗測資裡「第一個不同」在第幾行（越後面代表對得越多）；編譯失敗沒有分數（不比較）
       SC=$(printf '%s' "$OUT" | grep -oE '測資：[0-9]+ / [0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
@@ -947,14 +954,15 @@ FB_PYPROT
       elif [ "$SCN" -gt "$AB" ]; then AB=$SCN; AF=0
       else AF=$((AF+1)); fi
       echo "$AB" > .fb_att_best; echo "$AF" > .fb_att_fix
-      if [ "$AF" -ge 2 ] && [ "$RS" -lt 3 ] && [ "${RESTART:-1}" = 1 ]; then
+      TH=2; [ "$AB" -ge 10000 ] && TH=4   # 已經有測資通過（接近正確）就多給幾輪修正，不要太早丟掉
+      if [ "$AF" -ge "$TH" ] && [ "$RS" -lt 3 ] && [ "${RESTART:-1}" = 1 ]; then
         KB=""; KS=-1   # 這次作答最好的版本留一份（交卷備用）
         if [ -n "$BS" ] && [ -f "$BF" ]; then KB="$BF"; KS=$BS; fi
         if [ -n "$SC" ] && [ "$SC" -gt "$KS" ]; then KB="$SF"; KS=$SC; fi
         if [ -n "$KB" ] && [ "$KS" -gt "$(cat .fb_bestall_score 2>/dev/null || echo -1)" ]; then mkdir -p .fb_bestall; cp "$KB" ".fb_bestall/$(basename "$SF")"; echo "$KS" > .fb_bestall_score; fi
         rm -rf .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_sig .fb_n; echo $((RS+1)) > .fb_restarts; echo write > .stage
         ERRS=$(printf '%s\n' "$OUT" | grep -E '^  (預期|你的)：|^👉|error:' | head -3 | cut -c1-300)
-        echo "🔄 修了 2 輪都沒有進步：不再修補，請 AI 整題重新寫一次（第 $((RS+2)) 次作答）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+        echo "🔄 修了 $AF 輪都沒有進步：不再修補，請 AI 整題重新寫一次（第 $((RS+2)) 次作答）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
         echo "（重新作答：前一次的寫法修了幾輪都改不對。這次不要沿用之前的程式，換一個更簡單直接的寫法從頭寫。前一次最後錯在：）"; printf '%s\n' "$ERRS"
         print_write; rm -rf "$T"; exit 0
       fi
@@ -1020,7 +1028,7 @@ emit() {  # 有 problem.txt 且還沒全部通過 → 輸出「開新對話直�
       [ -f pack.txt ] && { echo "【參考零件】（只是參考，和題目不同時以題目為準）"; cat pack.txt; echo; }
       echo "【前一版的錯誤（不要再犯）】"
     else
-      echo "【修正任務】你是上機考解題助手。下面是題目、目前的程式和執行回報。先用一句話說錯在哪一行、為什麼，再給修正後的完整程式（只給一個程式碼區塊，程式裡不要寫註解）。輸出格式逐字照題目範例；不要心算。常見原因：輸出時重新讀取或重新計算了已經用掉的資料、欄位順序或位元順序弄反、型別溢位。"
+      echo "【修正任務】你是上機考解題助手。下面是題目、目前的程式和執行回報。照這個順序回答：(1) 針對回報裡第一筆失敗的那一行輸入，照題目規則列出正確的處理步驟（3～6 行；不用算出數值，只寫結構：這筆輸入共有幾個單位、哪一段是哪個欄位、陣列索引從哪到哪、迴圈跑幾次、什麼條件算錯誤）。(2) 指出目前程式哪一行和上面的步驟不一樣（常見：長度或索引差 1、緩衝區太小、迴圈多跑或少跑、條件寫反、輸出時重新讀取已經用掉的資料、位元順序弄反、型別溢位）。(3) 給修正後的完整程式（只給一個程式碼區塊，程式裡不要寫註解）。輸出格式逐字照題目範例。"
       KEY=$(grep -m1 '^👉' "$REP"); [ -n "$KEY" ] && { echo "【這次只要修這一個錯（最重要，先看這段）】"; printf '%s\n' "$KEY"; echo; }   # 診斷放最前面：小模型常只看開頭，跑去改無關的地方
       echo "【題目】"; prob_wo "$SRC"; echo
       [ -f pack.txt ] && ! grep -q "👉 這一行只差在" "$REP" && { echo "【參考零件】（只是參考，和題目不同時以題目為準；只附前 12 行省長度）"; head -n 12 pack.txt; echo; }   # 純格式錯誤時不附情境包（包裡的範例格式可能和題目不同，會誤導）
@@ -1038,9 +1046,15 @@ emit() {  # 有 problem.txt 且還沒全部通過 → 輸出「開新對話直�
 }
 
 compile_fail() {   # 印第一個錯誤（含 ld 的 undefined reference，原本只會印到 collect2 那行）與附近原始碼
+  # 缺的標頭檔是「題目起始程式本來就有 include 的 SDK 標頭」（或 Pico SDK 的路徑）而且專案裡找不到 → 不是 AI 寫錯，是這台電腦沒有那個 SDK
+  HDR=$(grep -m1 -oE 'fatal error: [^ ]+: No such file or directory' "$REP.err" | sed -E 's/fatal error: (.*): No such file or directory/\1/')
+  if [ -n "$HDR" ] && [ -z "$(find . -name "$(basename "$HDR")" ! -path './.fb*' ! -path './build/*' 2>/dev/null | head -1)" ] \
+     && { grep -qF -- "$HDR" problem.txt 2>/dev/null || grep -rqF -- "$HDR" .fb_bak 2>/dev/null || [[ "$HDR" =~ ^(pico|hardware|boards)/ ]] || [[ "$HDR" =~ \.pio\.h$ ]]; }; then
+    say "【只能用 CI 驗證】"; say "⚠️ 這台電腦沒有 $HDR（考場的 SDK／開發板才有），沒辦法在本機編譯。"; cat "$REP"; rm -f "$REP" "$REP.err" "$BIN"; exit 0
+  fi
   say "結果：編譯失敗"
   say "--- 第一個錯誤（編譯器原文）---"
-  if grep -qE 'error|undefined reference|multiple definition' "$REP.err"; then grep -m1 -A4 -E 'error|undefined reference|multiple definition' "$REP.err" | cut_lines 8 >> "$REP"
+  if grep -qE 'error|undefined reference|multiple definition' "$REP.err"; then grep -m1 -A4 -E 'error:|undefined reference|multiple definition' "$REP.err" | cut_lines 8 >> "$REP"
   else tail -n 6 "$REP.err" | cut_lines 6 >> "$REP"; fi   # 例如 make: *** No rule to make target
   EF=$(grep -m1 -oE '^[^: ]+\.(c|h|cpp):[0-9]+:[0-9]+: (fatal )?error' "$REP.err" | cut -d: -f1); [ -f "$EF" ] || EF="$SRC"
   LN=$(grep -m1 -oE ':[0-9]+:[0-9]+: (fatal )?error' "$REP.err" | cut -d: -f2)
@@ -1054,6 +1068,18 @@ compile_fail() {   # 印第一個錯誤（含 ld 的 undefined reference，原�
   emit; rm -f "$REP" "$REP.err" "$BIN"; exit 1
 }
 say "【執行回報】檔案：$SRC"
+ci_only() {   # 這個專案沒辦法在本機編譯／執行（要考場的 SDK 或開發板）：不當成程式錯誤，改用 GitLab 評分當測試
+  say "【只能用 CI 驗證】"; say "$1"; cat "$REP"; rm -f "$REP" "$REP.err" "$BIN"; exit 0
+}
+if [ -n "$PROJ" ] && [[ "$SRC" != *.py ]] && [ ! -f Makefile ] && [ ! -f makefile ] && [ -f CMakeLists.txt ]; then   # CMake 專案（例如 Pico 韌體）
+  command -v cmake >/dev/null 2>&1 || ci_only "⚠️ 這是 CMake 專案，但這台電腦沒有 cmake，沒辦法在本機編譯。"
+  if ! cmake -S . -B build > "$REP.err" 2>&1; then
+    grep -qiE 'PICO_SDK|pico_sdk|toolchain|arm-none-eabi|riscv|CMAKE_C_COMPILER|Could not find|not found' "$REP.err" && ci_only "⚠️ 這個 CMake 專案在本機設定失敗（缺少考場的 SDK／交叉編譯器），沒辦法在本機編譯。"
+    compile_fail
+  fi
+  cmake --build build > "$REP.err" 2>&1 || compile_fail
+  ci_only "✅ 本機編譯（cmake）成功。這是要在開發板上跑的韌體，本機不能執行。"
+fi
 if [ -n "$PROJ" ] && [[ "$SRC" != *.py ]] && [ ! -f Makefile ] && [ ! -f makefile ]; then   # 有起始檔但沒有 Makefile：gcc 編 SRC 和同資料夾的 .c（SRC 有 main 時，別的有 main 的 .c 不編）
   LTAG=c; CS="$SRC"; HM=0; grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$SRC" && HM=1
   for f in "$(dirname "$SRC")"/*.c; do [ "$f" -ef "$SRC" ] && continue; [ $HM = 1 ] && grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$f" && continue; CS="$CS $f"; done
