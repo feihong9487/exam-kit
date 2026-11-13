@@ -734,8 +734,9 @@ case "$STAGE" in
       [ -e "$f" ] && [ ! -e ".fb_bak/$f" ] && { mkdir -p .fb_bak; cp -r "$f" .fb_bak/; echo "⚠️ 資料夾裡原本就有 $f，已備份到 .fb_bak/（fb reset 會還原）" >&2; }
     done
     # 題型判斷：只看 ROS 專屬字；「節點／topic」單獨出現不算（鏈結串列、樹、圖、MQTT 題都會有）
-    if grep -qiE 'rclpy|rclcpp|ros ?2|ros2 |std_msgs|geometry_msgs|sensor_msgs|std_srvs|example_interfaces|/opt/ros|colcon|jazzy|humble' problem.txt \
-       || { grep -qiE '訂閱|subscri' problem.txt && grep -qiE '發佈|發布|publish' problem.txt && grep -qiE 'topic|主題|節點|node' problem.txt; }; then echo ros > .mode
+    # 題目有「範例輸入／標準輸入」＝從 stdin 讀資料的一般程式題（例如「統計 ROS 2 日誌」），就算提到 ROS 也不是要寫節點
+    if ! grep -qiE '範例輸入|輸入範例|sample input|標準輸入|stdin' problem.txt && { grep -qiE 'rclpy|rclcpp|ros ?2|ros2 |std_msgs|geometry_msgs|sensor_msgs|std_srvs|example_interfaces|/opt/ros|colcon|jazzy|humble' problem.txt \
+       || { grep -qiE '訂閱|subscri' problem.txt && grep -qiE '發佈|發布|publish' problem.txt && grep -qiE 'topic|主題|節點|node' problem.txt; }; }; then echo ros > .mode
     elif [ -f Makefile ] || [ -f makefile ] || has_starter_c; then echo proj > .mode   # 有 Makefile，或題目提到／有 TODO 的 .c 起始檔（沒有 Makefile 時用 gcc 編）；無關的 .c 不算
     else echo std > .mode; fi
     attach_files   # 考場資料夾裡題目提到的起始檔（.c/.h/.py/.pio）附在題目後面，AI 才看得到 TODO／要修的程式
@@ -933,12 +934,18 @@ FB_PYPROT
       NOTE="（你上一次給的程式和【目前程式】一模一樣，完全沒有修改。這次一定要針對回報的錯誤實際修改程式。）"
     fi
     if [ "$MODE" != ros ] && ! printf '%s' "$OUT" | grep -q '全部通過'; then   # 只前進不後退：新版本通過的測資比之前少，就換回之前最好的版本再請 AI 改
+      # 分數＝通過的測資組數 ×10000 ＋ 第一筆失敗測資裡「第一個不同」在第幾行（越後面代表對得越多）；編譯失敗沒有分數（不比較）
       SC=$(printf '%s' "$OUT" | grep -oE '測資：[0-9]+ / [0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
+      # （行級分數在 12 題新題的實測沒有比較好：1/12 對 4/12，所以只用「通過幾組」當分數，行數固定 0）
+      if [ -n "$SC" ]; then DL=0; SC=$(( SC * 10000 + DL )); fi
       BS=$(cat .fb_best_score 2>/dev/null); BF=".fb_best/$(basename "$SF")"
       if [ -n "$SC" ] && [ -n "$BS" ] && [ -f "$BF" ] && [ "$SC" -lt "$BS" ]; then
         cp "$BF" "$SF"
-        echo "↩️ 這一版只過 $SC 組測資，比之前的 $BS 組更差：已自動換回之前比較好的版本。" >&2
-        NOTE="（你上一次的修改讓通過的測資從 $BS 組掉到 $SC 組，改壞了；已經還原成修改前的版本，就是下面的【目前程式】。這次換一個改法，只針對下面回報的那一個錯誤改，其他地方不要動。）"
+        if [ $(( SC / 10000 )) -lt $(( BS / 10000 )) ]; then WHY="通過的測資從 $(( BS / 10000 )) 組掉到 $(( SC / 10000 )) 組"
+        elif [ $(( SC % 10000 )) -eq 0 ]; then WHY="原本前 $(( BS % 10000 - 1 )) 行輸出是對的，現在程式沒有正常跑完（當掉、逾時或沒有輸出）"
+        else WHY="原本前 $(( BS % 10000 - 1 )) 行輸出是對的，現在第 $(( SC % 10000 )) 行就錯了"; fi
+        echo "↩️ 這一版比之前更差（$WHY）：已自動換回之前比較好的版本。" >&2
+        NOTE="（你上一次的修改把程式改壞了：$WHY。已經還原成修改前的版本，就是下面的【目前程式】。這次換一個改法，只針對下面回報的那一個錯誤改，其他地方不要動。）"
         if [ "$MODE" = proj ]; then OUT=$(PROJ=1 bash "$SELF" check "$SF"); else OUT=$(bash "$SELF" check "$SF"); fi
       elif [ -n "$SC" ] && { [ -z "$BS" ] || [ "$SC" -ge "$BS" ]; }; then
         mkdir -p .fb_best; cp "$SF" "$BF"; echo "$SC" > .fb_best_score
@@ -995,6 +1002,7 @@ emit() {  # 有 problem.txt 且還沒全部通過 → 輸出「開新對話直�
       echo "【前一版的錯誤（不要再犯）】"
     else
       echo "【修正任務】你是上機考解題助手。下面是題目、目前的程式和執行回報。先用一句話說錯在哪一行、為什麼，再給修正後的完整程式（只給一個程式碼區塊，程式裡不要寫註解）。輸出格式逐字照題目範例；不要心算。常見原因：輸出時重新讀取或重新計算了已經用掉的資料、欄位順序或位元順序弄反、型別溢位。"
+      KEY=$(grep -m1 '^👉' "$REP"); [ -n "$KEY" ] && { echo "【這次只要修這一個錯（最重要，先看這段）】"; printf '%s\n' "$KEY"; echo; }   # 診斷放最前面：小模型常只看開頭，跑去改無關的地方
       echo "【題目】"; prob_wo "$SRC"; echo
       [ -f pack.txt ] && ! grep -q "👉 這一行只差在" "$REP" && { echo "【參考零件】（只是參考，和題目不同時以題目為準；只附前 12 行省長度）"; head -n 12 pack.txt; echo; }   # 純格式錯誤時不附情境包（包裡的範例格式可能和題目不同，會誤導）
       echo "【目前程式】"; echo '```'"$LTAG"; cat "$SRC"; echo '```'
@@ -1030,7 +1038,7 @@ say "【執行回報】檔案：$SRC"
 if [ -n "$PROJ" ] && [[ "$SRC" != *.py ]] && [ ! -f Makefile ] && [ ! -f makefile ]; then   # 有起始檔但沒有 Makefile：gcc 編 SRC 和同資料夾的 .c（SRC 有 main 時，別的有 main 的 .c 不編）
   LTAG=c; CS="$SRC"; HM=0; grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$SRC" && HM=1
   for f in "$(dirname "$SRC")"/*.c; do [ "$f" -ef "$SRC" ] && continue; [ $HM = 1 ] && grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$f" && continue; CS="$CS $f"; done
-  gcc -O2 -Wall -Wextra -pthread -o .fb_app $CS -lm 2> "$REP.err" || compile_fail
+  gcc -O2 -Wall -Wextra -Wno-unused-result -pthread -o .fb_app $CS -lm 2> "$REP.err" || compile_fail
   RUN=./.fb_app; echo ./.fb_app > .fb_prog
   W=$(grep -c 'warning' "$REP.err")
   [ "$W" -gt 0 ] && { say "編譯（gcc $CS）：成功，但有 $W 個 warning（第一個如下）"; grep -m1 'warning' "$REP.err" | cut_lines 1 >> "$REP"; } || say "編譯（gcc $CS）：成功"
@@ -1046,7 +1054,7 @@ elif [ -n "$PROJ" ] && [[ "$SRC" != *.py ]]; then   # 多檔案專案：用 make
 else
 case "$SRC" in
   *.c)  LTAG=c; RUN="$BIN"
-        gcc -O2 -Wall -Wextra -pthread -o "$BIN" "$SRC" -lm 2> "$REP.err" || compile_fail
+        gcc -O2 -Wall -Wextra -Wno-unused-result -pthread -o "$BIN" "$SRC" -lm 2> "$REP.err" || compile_fail
         W=$(grep -c 'warning' "$REP.err")
         [ "$W" -gt 0 ] && { say "編譯：成功，但有 $W 個 warning（第一個如下）"; grep -m1 'warning' "$REP.err" | cut_lines 1 >> "$REP"; } || say "編譯：成功，0 warning" ;;
   *.cpp) LTAG=cpp; RUN="$BIN"
