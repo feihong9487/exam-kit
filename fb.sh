@@ -448,6 +448,7 @@ case "$1" in
          CPSRC="$SRC"; STG=$(cat .stage 2>/dev/null); PV=".fb_pass/$(basename "$SRC")"
          if [ "$STG" != done ] && [ "$STG" != brute ]; then
            if [ -f "$PV" ] && ! cmp -s "$PV" "$SRC"; then CPSRC="$PV"; echo "ℹ️ 目前的程式還沒通過範例，改交「之前通過範例的那一版」（$PV）。"
+           elif [ ! -f "$PV" ] && [ -f ".fb_bestall/$(basename "$SRC")" ] && [ "$(cat .fb_bestall_score 2>/dev/null || echo -1)" -gt "$(cat .fb_best_score 2>/dev/null || echo -1)" ]; then CPSRC=".fb_bestall/$(basename "$SRC")"; echo "ℹ️ 還沒有通過範例的版本，改交「目前為止通過最多測資的那一版」（$CPSRC）。"
            else echo "⚠️ 這題在本機還沒通過範例；照樣交出去，但 CI 可能不會過。"; fi
          fi
          if ! command -v git >/dev/null 2>&1; then
@@ -680,7 +681,7 @@ case "$1" in
          echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
-         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
+         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_restarts .fb_bestall .fb_bestall_score brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
            [ -e "$f" ] && mv "$f" "$B/"; done
          if [ -d .fb_bak ]; then cp -r .fb_bak/. . && echo "（已還原考場原本的檔案：$(ls -A .fb_bak | tr '\n' ' ')）"; rm -rf .fb_bak; fi
          echo "已清空（舊檔在 $B）。開始新的一題：fb 然後貼上題目"; exit 0 ;;
@@ -729,6 +730,7 @@ case "$STAGE" in
     if [ -n "$TOPD" ] && [ -f "$TOPD/.srecruit/answer-files" ]; then   # 考場 repo：.srecruit/answer-files＝會被評分的檔案 → 寫進題目，fb 與 AI 都只改這些
       AFR=$(sed 's/\r$//' "$TOPD/.srecruit/answer-files" | grep -v '^[[:space:]]*$' | while read -r a; do realpath -m --relative-to="$PWD" "$TOPD/$a"; done | tr '\n' ' ')
       echo "【會被評分的檔案（只改這些）】$AFR" >> problem.txt; echo "ℹ️ 這個作答 repo 會被評分的檔案：$AFR" >&2
+      echo "$AFR" | grep -q '[.]py' && ! echo "$AFR" | grep -qE '[.](c|h)( |$)' && echo "（評分檔是 .py：請使用 Python 3 作答）" >> problem.txt
     fi
     for f in main.c main.py tests; do   # 考場資料夾原本就有的檔案先備份（fb 之後會覆寫 main.c、重建 tests/）
       [ -e "$f" ] && [ ! -e ".fb_bak/$f" ] && { mkdir -p .fb_bak; cp -r "$f" .fb_bak/; echo "⚠️ 資料夾裡原本就有 $f，已備份到 .fb_bak/（fb reset 會還原）" >&2; }
@@ -939,6 +941,23 @@ FB_PYPROT
       # （行級分數在 12 題新題的實測沒有比較好：1/12 對 4/12，所以只用「通過幾組」當分數，行數固定 0）
       if [ -n "$SC" ]; then DL=0; SC=$(( SC * 10000 + DL )); fi
       BS=$(cat .fb_best_score 2>/dev/null); BF=".fb_best/$(basename "$SF")"
+      # 重新作答：小模型「修補」能力差，解得出來的題目多半前 2～3 輪就過。同一次作答連續 2 輪修正都沒有讓通過的測資變多 → 不再補，回到「從頭寫」重抽一次（最多重來 3 次；RESTART=0 可關）
+      SCN=${SC:--1}; AB=$(cat .fb_att_best 2>/dev/null || echo -2); AF=$(cat .fb_att_fix 2>/dev/null || echo 0); RS=$(cat .fb_restarts 2>/dev/null || echo 0)
+      if [ "$STAGE" = write ] || [ "$AB" = -2 ]; then AB=$SCN; AF=0
+      elif [ "$SCN" -gt "$AB" ]; then AB=$SCN; AF=0
+      else AF=$((AF+1)); fi
+      echo "$AB" > .fb_att_best; echo "$AF" > .fb_att_fix
+      if [ "$AF" -ge 2 ] && [ "$RS" -lt 3 ] && [ "${RESTART:-1}" = 1 ]; then
+        KB=""; KS=-1   # 這次作答最好的版本留一份（交卷備用）
+        if [ -n "$BS" ] && [ -f "$BF" ]; then KB="$BF"; KS=$BS; fi
+        if [ -n "$SC" ] && [ "$SC" -gt "$KS" ]; then KB="$SF"; KS=$SC; fi
+        if [ -n "$KB" ] && [ "$KS" -gt "$(cat .fb_bestall_score 2>/dev/null || echo -1)" ]; then mkdir -p .fb_bestall; cp "$KB" ".fb_bestall/$(basename "$SF")"; echo "$KS" > .fb_bestall_score; fi
+        rm -rf .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_sig .fb_n; echo $((RS+1)) > .fb_restarts; echo write > .stage
+        ERRS=$(printf '%s\n' "$OUT" | grep -E '^  (預期|你的)：|^👉|error:' | head -3 | cut -c1-300)
+        echo "🔄 修了 2 輪都沒有進步：不再修補，請 AI 整題重新寫一次（第 $((RS+2)) 次作答）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+        echo "（重新作答：前一次的寫法修了幾輪都改不對。這次不要沿用之前的程式，換一個更簡單直接的寫法從頭寫。前一次最後錯在：）"; printf '%s\n' "$ERRS"
+        print_write; rm -rf "$T"; exit 0
+      fi
       if [ -n "$SC" ] && [ -n "$BS" ] && [ -f "$BF" ] && [ "$SC" -lt "$BS" ]; then
         cp "$BF" "$SF"
         if [ $(( SC / 10000 )) -lt $(( BS / 10000 )) ]; then WHY="通過的測資從 $(( BS / 10000 )) 組掉到 $(( SC / 10000 )) 組"
