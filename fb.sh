@@ -458,6 +458,13 @@ case "$1" in
          [ -n "$(git config --global credential.helper)" ] || git config --global credential.helper 'cache --timeout=36000'
          TOP=$(git rev-parse --show-toplevel 2>/dev/null)
          if [ -n "$TOP" ]; then R="$TOP"; D=$(realpath --relative-to="$TOP" "$SRC")   # fb 就在作答 repo 裡用：直接交這個檔
+           AFF="$R/.srecruit/answer-files"   # 考場 repo 的「會被評分的檔案」清單
+           if [ -f "$AFF" ] && ! sed 's/\r$//' "$AFF" | grep -qxF -- "$D"; then
+             C=$(sed 's/\r$//' "$AFF" | grep -E "\.${SRC##*.}\$"); CR=$(realpath --relative-to="$TOP" "$PWD")
+             [ "$(printf '%s\n' "$C" | grep -c .)" -gt 1 ] && C=$(printf '%s\n' "$C" | grep -E "^$CR/" )
+             if [ "$(printf '%s\n' "$C" | grep -c .)" = 1 ]; then echo "ℹ️ 依 .srecruit/answer-files，程式交到 $C"; D="$C"; mkdir -p "$R/$(dirname "$D")"; cp "$SRC" "$R/$D"
+             else echo "⚠️ $D 不在 .srecruit/answer-files（會被評分的是：$(sed 's/\r$//' "$AFF" | tr '\n' ' ')）。照樣交出，但可能不會被評分。"; fi
+           fi
          else
            R="${2:-$(cat .fb_repo 2>/dev/null)}"
            if [ -z "$R" ] || [ ! -d "$R/.git" ]; then
@@ -476,9 +483,15 @@ case "$1" in
            echo "$R" > .fb_repo
            D="${3:-$(cat .fb_dest 2>/dev/null)}"
            if [ -z "$D" ]; then
-             EXT="${SRC##*.}"; mapfile -t FS < <(cd "$R" && git ls-files | grep -E "\.$EXT\$")
+             EXT="${SRC##*.}"; AFF="$R/.srecruit/answer-files"
+             if [ -f "$AFF" ]; then   # 考場 repo 有「會被評分的檔案」清單：只從清單裡選
+               mapfile -t FS < <(sed 's/\r$//' "$AFF" | grep -E "\.$EXT\$"); [ ${#FS[@]} -gt 0 ] || mapfile -t FS < <(sed 's/\r$//' "$AFF" | grep -v '^[[:space:]]*$')
+               [ ${#FS[@]} -eq 1 ] && { D="${FS[0]}"; echo "ℹ️ 依 .srecruit/answer-files，程式交到 $D"; }
+             else mapfile -t FS < <(cd "$R" && git ls-files | grep -E "\.$EXT\$"); fi
+           fi
+           if [ -z "$D" ]; then
              if [ ${#FS[@]} -gt 0 ]; then
-               echo "repo 裡的 .$EXT 檔："; i=0; for f in "${FS[@]}"; do i=$((i+1)); echo "  $i) $f"; done
+               echo "要交到哪一個檔案？$( [ -f "$AFF" ] && echo '（.srecruit/answer-files 列的會被評分的檔案）')"; i=0; for f in "${FS[@]}"; do i=$((i+1)); echo "  $i) $f"; done
                echo "  0) 都不是 → 自己輸入檔名"
                read -r -p "程式要放到哪一個？（輸入編號，直接 Enter = 1）：" k </dev/tty; k=${k:-1}
                if [ "$k" = 0 ]; then read -r -p "輸入檔名（可含資料夾，例如 q1/main.c）：" D </dev/tty; else D="${FS[$((k-1))]}"; fi
@@ -525,7 +538,7 @@ case "$1" in
          exit 0 ;;
   task)  # 任務模式：不是「寫一支程式」的題目（要下指令觀察、改設定／Makefile、解 git 衝突、在專案裡找要改哪裡）→ AI 給檔案與指令，fb 確認後照做並回報
          if [ "$2" = done ]; then echo done > .task_stage; echo "✅ 已標記這個任務完成。要交卷就打 fb submit。"; exit 0; fi
-         if [ "$2" = reset ]; then rm -rf .task_stage .task.txt .task_log .task_last .task_orig; echo "任務模式已清空。重新開始：fb task"; exit 0; fi
+         if [ "$2" = reset ]; then rm -rf .task_stage .task.txt .task_log .task_last .task_orig .task_af; echo "任務模式已清空。重新開始：fb task"; exit 0; fi
          TS=$(cat .task_stage 2>/dev/null || echo start)
          [ "$TS" = done ] && { echo "✅ 這個任務 AI 已經說完成了。要重來：fb task reset"; exit 0; }
          task_prompt() {
@@ -535,6 +548,7 @@ case "$1" in
            [ $ISROS -eq 1 ] && echo "ROS 提示：要觀察題目給的節點，用 timeout 60 python3 檔名.py & 接著 sleep 3 再用 ros2 指令看；ros2 topic echo 要加 timeout 5。下面【目前在跑的 ROS…】是 fb 自動查到的實際名稱，答案要以它為準。"
            echo "【任務】"; head -c 1200 .task.txt; [ "$(wc -c < .task.txt)" -gt 1200 ] && echo "…（任務太長已截斷；完整內容可用 cat .task.txt 查看）"; echo
            echo "【目前資料夾】$(pwd)；檔案：$(ls -p | grep -v '^\.' | head -25 | tr '\n' ' ')"
+           [ -s .task_af ] && echo "【會被評分的檔案（作答只改這些；.gitlab-ci.yml 不要改）】$(tr '\n' ' ' < .task_af)"
            if [ -f /opt/ros/jazzy/setup.bash ] && [ $ISROS -eq 1 ]; then   # 自動附上目前的 ROS 圖，AI 不用自己找
              RG=$( (source /opt/ros/jazzy/setup.bash >/dev/null 2>&1; N=$(timeout 8 ros2 node list 2>/dev/null); [ -n "$N" ] && { echo "節點：$(echo "$N" | tr '\n' ' ')"; timeout 8 ros2 topic list -t 2>/dev/null | grep -vE '^/(rosout|parameter_events) ' | sed 's/^/topic /'; timeout 8 ros2 service list -t 2>/dev/null | grep -vE '_parameters|parameter_types|type_description' | sed 's/^/service /'; }) | head -20 | cut -c1-150)
              [ -n "$RG" ] && { echo "【目前在跑的 ROS 節點、topic（含型別）、service】"; echo "$RG"; }
@@ -567,6 +581,8 @@ case "$1" in
          if [ "$TS" = start ]; then
            printf '%s\n' "$IN" > .task.txt; : > .task_log; rm -f .task_last; echo run > .task_stage
            find . -maxdepth 3 -type f ! -path './.*' ! -path '*/.git/*' 2>/dev/null | sed 's#^\./##' > .task_orig   # 題目原本就有的檔案（之後 AI 要改寫，題目得有叫它改）
+           TOPD=$(git rev-parse --show-toplevel 2>/dev/null); : > .task_af
+           [ -n "$TOPD" ] && [ -f "$TOPD/.srecruit/answer-files" ] && sed 's/\r$//' "$TOPD/.srecruit/answer-files" | grep -v '^[[:space:]]*$' | while read -r a; do realpath -m --relative-to="$PWD" "$TOPD/$a"; done > .task_af   # 會被評分的檔案
            GD=$(git rev-parse --git-dir 2>/dev/null) && for x in '.task*' '.fb_*' '.fb_task_bak/' '.stage' '.sid' '.mode' '.pack_manual' 'pack.txt' 'problem.txt' 'node.log' 'verify.out'; do   # fb 的暫存檔不要被 git add -A 交出去（只寫在本機 .git/info/exclude）
              grep -qxF "$x" "$GD/info/exclude" 2>/dev/null || echo "$x" >> "$GD/info/exclude"; done
            echo "✅ 已存任務（任務模式）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
@@ -590,7 +606,7 @@ case "$1" in
              case "$P" in "$PWD"/*) P="${P#"$PWD"/}" ;; esac   # AI 常寫成絕對路徑：在目前資料夾底下就換成相對路徑
              case "$P" in /etc/*|/usr/*|/bin/*|/sbin/*|/boot/*|/proc/*|/sys/*|/dev/*|/lib*) WARN="$WARN（沒有寫入 $P：系統資料夾不能改，請用目前資料夾底下的相對路徑）"$'\n'; continue ;; esac
              case "$P" in .task*|.fb*|task.txt) WARN="$WARN（沒有寫入 $P：那是 fb 自己的檔案）"$'\n'; continue ;; esac
-             if grep -qxF -- "$P" .task_orig 2>/dev/null; then   # 題目原本就有的檔案：題目要「改」它才准寫
+             if grep -qxF -- "$P" .task_orig 2>/dev/null && ! grep -qxF -- "$P" .task_af 2>/dev/null; then   # 題目原本就有的檔案：題目要「改」它才准寫（.srecruit/answer-files 列的評分檔可以改）
                if ! grep -qiE '修改|修正|修好|修復|補完|補上|實作|改寫|改成|改好|改為|新增|加上|TODO|fix|implement|modify|edit|complete|update' .task.txt; then
                  WARN="$WARN（沒有寫入 $P：這是題目給的檔案，題目沒有要你改它；請用指令執行或 cat 查看它）"$'\n'; continue; fi
                if ! grep -qF -- "$(basename "$P")" .task.txt && grep -qiE '[A-Za-z0-9_]\.(c|h|py|cpp|sh|yaml|yml|json|xml)([^A-Za-z]|$)|Makefile' .task.txt; then
@@ -704,6 +720,11 @@ fi
 case "$STAGE" in
   start)
     printf '%s\n' "$IN" > problem.txt; echo select > .stage
+    TOPD=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [ -n "$TOPD" ] && [ -f "$TOPD/.srecruit/answer-files" ]; then   # 考場 repo：.srecruit/answer-files＝會被評分的檔案 → 寫進題目，fb 與 AI 都只改這些
+      AFR=$(sed 's/\r$//' "$TOPD/.srecruit/answer-files" | grep -v '^[[:space:]]*$' | while read -r a; do realpath -m --relative-to="$PWD" "$TOPD/$a"; done | tr '\n' ' ')
+      echo "【會被評分的檔案（只改這些）】$AFR" >> problem.txt; echo "ℹ️ 這個作答 repo 會被評分的檔案：$AFR" >&2
+    fi
     for f in main.c main.py tests; do   # 考場資料夾原本就有的檔案先備份（fb 之後會覆寫 main.c、重建 tests/）
       [ -e "$f" ] && [ ! -e ".fb_bak/$f" ] && { mkdir -p .fb_bak; cp -r "$f" .fb_bak/; echo "⚠️ 資料夾裡原本就有 $f，已備份到 .fb_bak/（fb reset 會還原）" >&2; }
     done
