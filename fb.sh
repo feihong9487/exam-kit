@@ -302,6 +302,65 @@ stress_after() {   # $1=stress_run 的結果；$2=程式檔
        echo "🎉 全部通過（含對拍）！交卷：直接打 fb submit（第一次會問作答專案的網址和檔名）。下一題：fb reset" >&2 ;;
   esac
 }
+est_tok() { python3 -c 'import sys; t=sys.stdin.read(); c=sum(1 for ch in t if ord(ch)>0x2e7f); print(c+(len(t)-c)//3)' 2>/dev/null || echo 0; }   # 粗估 token 數（中日韓字 1 個算 1，其他 3 個字元算 1）
+dg_split() {   # 題目太長（考場 AI 一次只能看約 4096 token）：把 $1 切成每段約 1300 token 的 .fb_chunk/1..K（盡量在空行切、不切斷程式碼區塊），印出 K
+  rm -rf .fb_chunk; mkdir -p .fb_chunk
+  python3 - "$1" <<'FB_PYSPLIT'
+import sys
+t = open(sys.argv[1], encoding="utf-8", errors="replace").read().replace("\r", "")
+def tok(s):
+    c = sum(1 for ch in s if ord(ch) > 0x2e7f)
+    return c + (len(s) - c) // 3
+paras, cur, fence = [], [], False
+for line in t.split("\n"):
+    if line.strip().startswith("```"): fence = not fence
+    cur.append(line)
+    if not fence and line.strip() == "":
+        paras.append("\n".join(cur)); cur = []
+if cur: paras.append("\n".join(cur))
+pieces = []
+for p in paras:
+    if tok(p) <= 1300:
+        pieces.append(p); continue
+    buf = []
+    for line in p.split("\n"):
+        if buf and tok("\n".join(buf + [line])) > 1300:
+            pieces.append("\n".join(buf)); buf = []
+        buf.append(line)
+    if buf: pieces.append("\n".join(buf))
+chunks, cur = [], ""
+for p in pieces:
+    if cur and tok(cur + "\n" + p) > 1300:
+        chunks.append(cur); cur = p
+    else:
+        cur = (cur + "\n" + p) if cur else p
+if cur.strip(): chunks.append(cur)
+for i, c in enumerate(chunks, 1):
+    open(".fb_chunk/%d" % i, "w", encoding="utf-8").write(c.strip("\n") + "\n")
+print(len(chunks))
+FB_PYSPLIT
+}
+print_digest() {   # $1=第幾段 $2=共幾段
+  echo "你是上機考助手。下面是一份很長的題目／說明文件的第 $1／$2 段，我之後要照它作答，但文件太長，需要你先濃縮。請把這一段濃縮成條列重點（15～25 行），一定要保留：每一個檔名、函式名、指令（整行照抄）、topic／node／參數名稱、要我執行的步驟、要我觀察或回答的事、要我寫或修改的程式與它該有的行為、輸入輸出格式、所有數字與範例。可以刪掉的只有：寒暄、重複的解釋、原理背景。名稱、數字、指令、格式字串一律照原文抄，不要改寫，不要回答「無」，不要寫程式、不要解題。"
+  echo "【第 $1 段】"; cat ".fb_chunk/$1"
+}
+dg_samples() {   # 從原文把「範例輸入／輸出」那一段逐字留下來（AI 濃縮時常把範例抄錯）
+  python3 - "$1" <<'FB_PYSAMP'
+import sys, re
+L = open(sys.argv[1], encoding="utf-8", errors="replace").read().replace("\r", "").split("\n")
+s = next((i for i, l in enumerate(L) if re.search(r"範例輸入|輸入範例|[Ss]ample [Ii]nput|[Ee]xample [Ii]nput", l)), None)
+if s is not None:
+    print("【範例（原文）】"); print("\n".join(L[s:])[:1500])
+FB_PYSAMP
+}
+dg_finish() {   # 濃縮完成：重點＋原文範例
+  local D; D=$(grep -vE '^[[:space:]]*(```.*|（無）|\(無\)|無)[[:space:]]*$' .fb_digest.txt | cat -s | head -c 4200)
+  if [ "$(printf '%s' "$D" | wc -c)" -lt 300 ]; then   # AI 幾乎沒濃縮出東西：改用原文的開頭（寧可長一點，也不要把題目弄丟）
+    echo "⚠️ AI 濃縮出來的內容太少，改用題目原文的前半段（完整原文在 .fb_full.txt；可以自己編輯 problem.txt 只留重點）。" >&2
+    echo "【題目（原文太長，只取開頭；完整原文在 .fb_full.txt）】"; python3 -c 'import sys; t=open(".fb_full.txt",encoding="utf-8",errors="replace").read(); print(t[:2600])'
+  else echo "【題目重點（由很長的題目說明濃縮；原文在 .fb_full.txt）】"; printf '%s\n' "$D"; fi
+  dg_samples .fb_full.txt
+}
 get_pack() {   # 從 packs.txt 取出某個情境包
   [ -f "$PACKS" ] || { echo "⚠️ 找不到 packs.txt，這次不附情境包" >&2; return 1; }
   awk -v id="$1" '/^@@@ /{p=($2==id); next} p' "$PACKS" > pack.tmp
@@ -544,7 +603,7 @@ case "$1" in
          exit 0 ;;
   task)  # 任務模式：不是「寫一支程式」的題目（要下指令觀察、改設定／Makefile、解 git 衝突、在專案裡找要改哪裡）→ AI 給檔案與指令，fb 確認後照做並回報
          if [ "$2" = done ]; then echo done > .task_stage; echo "✅ 已標記這個任務完成。要交卷就打 fb submit。"; exit 0; fi
-         if [ "$2" = reset ]; then rm -rf .task_stage .task.txt .task_log .task_last .task_orig .task_af; echo "任務模式已清空。重新開始：fb task"; exit 0; fi
+         if [ "$2" = reset ]; then rm -rf .task_stage .task.txt .task_log .task_last .task_orig .task_af .fb_full.txt .fb_chunk .fb_digest.txt .fb_dg_i; echo "任務模式已清空。重新開始：fb task"; exit 0; fi
          TS=$(cat .task_stage 2>/dev/null || echo start)
          [ "$TS" = done ] && { echo "✅ 這個任務 AI 已經說完成了。要重來：fb task reset"; exit 0; }
          task_prompt() {
@@ -552,7 +611,7 @@ case "$1" in
            echo "規則：1. 建立或修改檔案：程式碼區塊的前一行寫「FILE: 檔名」（用目前資料夾底下的相對路徑），區塊裡放該檔案修改後的『完整內容』；Makefile 的指令行用 Tab 開頭。2. 要執行的指令放在一個 ${FENCE}bash 區塊。不要把輸出導到檔案（不要用 > xxx.txt），直接印出來我才看得到。不要寫 <名稱> 這種佔位字，要用【上一步的結果】裡的實際名稱。3. 題目給的檔案，除非題目要你改，否則不要改寫它，用指令執行或查看就好。不要用 vim、nano、sudo。4. 先 cat 看懂題目給的檔案，一次只做一小步，只做和【任務】有關的事。5. 任務全部完成也驗證過，就只回覆【完成】加一句說明，不要再給指令。"
            ISROS=0; grep -qiE 'ros|topic|節點|service' .task.txt && ISROS=1
            [ $ISROS -eq 1 ] && echo "ROS 提示：要觀察題目給的節點，用 timeout 60 python3 檔名.py & 接著 sleep 3 再用 ros2 指令看；ros2 topic echo 要加 timeout 5。下面【目前在跑的 ROS…】是 fb 自動查到的實際名稱，答案要以它為準。"
-           echo "【任務】"; head -c 1200 .task.txt; [ "$(wc -c < .task.txt)" -gt 1200 ] && echo "…（任務太長已截斷；完整內容可用 cat .task.txt 查看）"; echo
+           echo "【任務】"; head -c 3000 .task.txt; [ "$(wc -c < .task.txt)" -gt 3000 ] && echo "…（任務太長已截斷；完整內容可用 cat .task.txt 查看）"; echo
            echo "【目前資料夾】$(pwd)；檔案：$(ls -p | grep -v '^\.' | head -25 | tr '\n' ' ')"
            [ -s .task_af ] && echo "【會被評分的檔案（作答只改這些；.gitlab-ci.yml 不要改）】$(tr '\n' ' ' < .task_af)"
            if [ -f /opt/ros/jazzy/setup.bash ] && [ $ISROS -eq 1 ]; then   # 自動附上目前的 ROS 圖，AI 不用自己找
@@ -584,6 +643,21 @@ case "$1" in
            IFS= read -r -d "$(printf '\004')" IN; stty icanon 2>/dev/null; echo >&2
          else IN=$(cat); fi
          [ -n "$IN" ] || { echo "沒有貼到任何東西" >&2; exit 1; }
+         if [ "$TS" = digest ]; then   # 長題目濃縮中（和 fb 一般流程共用 dg_* 函式）
+           DI=$(cat .fb_dg_i 2>/dev/null || echo 1); DK=$(ls .fb_chunk 2>/dev/null | wc -l); printf '%s\n' "$IN" >> .fb_digest.txt
+           if [ "$DI" -lt "$DK" ]; then
+             echo $((DI+1)) > .fb_dg_i
+             echo "✅ 第 $DI／$DK 段的重點收到了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+             print_digest $((DI+1)) "$DK"; exit 0
+           fi
+           IN=$(dg_finish); TS=start; DIGESTED=1
+           echo "✅ 題目濃縮完成（原文在 .fb_full.txt）。" >&2
+         fi
+         if [ "$TS" = start ] && [ -z "$DIGESTED" ] && [ "${DIGEST:-1}" = 1 ] && [ "$(printf '%s' "$IN" | est_tok)" -gt 900 ]; then   # 任務說明太長：先分段濃縮
+           printf '%s\n' "$IN" > .fb_full.txt; DK=$(dg_split .fb_full.txt); : > .fb_digest.txt; echo 1 > .fb_dg_i; echo digest > .task_stage
+           echo "ℹ️ 題目很長（考場 AI 一次看不完）：先分 $DK 段請 AI 濃縮成重點，共要貼 $DK 次。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+           print_digest 1 "$DK"; exit 0
+         fi
          if [ "$TS" = start ]; then
            printf '%s\n' "$IN" > .task.txt; : > .task_log; rm -f .task_last; echo run > .task_stage
            find . -maxdepth 3 -type f ! -path './.*' ! -path '*/.git/*' 2>/dev/null | sed 's#^\./##' > .task_orig   # 題目原本就有的檔案（之後 AI 要改寫，題目得有叫它改）
@@ -681,7 +755,7 @@ case "$1" in
          echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
-         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_restarts .fb_bestall .fb_bestall_score brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
+         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score .fb_att_best .fb_att_fix .fb_restarts .fb_bestall .fb_bestall_score .fb_full.txt .fb_chunk .fb_digest.txt .fb_dg_i brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
            [ -e "$f" ] && mv "$f" "$B/"; done
          if [ -d .fb_bak ]; then cp -r .fb_bak/. . && echo "（已還原考場原本的檔案：$(ls -A .fb_bak | tr '\n' ' ')）"; rm -rf .fb_bak; fi
          echo "已清空（舊檔在 $B）。開始新的一題：fb 然後貼上題目"; exit 0 ;;
@@ -723,8 +797,24 @@ if [ "$NB" -eq 0 ] && [[ "$STAGE" =~ ^(write|fix)$ ]] && unfenced_code "$T"; the
   NB=1; echo "ℹ️ 回覆裡沒有 \`\`\` 區塊（多半是用滑鼠反白複製時不見了），fb 已自己找出程式碼。下次可改按 AI 回答下方的「複製」按鈕。" >&2
 fi
 
+if [ "$STAGE" = digest ]; then   # 長題目濃縮中：收第 i 段的重點；全部收完就把「重點＋原文範例」當成題目，接著走一般流程
+  DI=$(cat .fb_dg_i 2>/dev/null || echo 1); DK=$(ls .fb_chunk 2>/dev/null | wc -l)
+  printf '%s\n' "$IN" >> .fb_digest.txt
+  if [ "$DI" -lt "$DK" ]; then
+    echo $((DI+1)) > .fb_dg_i
+    echo "✅ 第 $DI／$DK 段的重點收到了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+    print_digest $((DI+1)) "$DK"; rm -rf "$T"; exit 0
+  fi
+  IN=$(dg_finish); STAGE=start; DIGESTED=1
+  echo "✅ 題目濃縮完成（$DK 段 → 約 $(printf '%s' "$IN" | est_tok) token；原文在 .fb_full.txt，濃縮結果會存成 problem.txt，覺得漏了重點可以自己用編輯器補）。" >&2
+fi
 case "$STAGE" in
   start)
+    if [ -z "$DIGESTED" ] && [ "${DIGEST:-1}" = 1 ] && [ "$(printf '%s' "$IN" | est_tok)" -gt 1500 ]; then   # 題目太長：先分段請 AI 濃縮（DIGEST=0 可關）
+      printf '%s\n' "$IN" > .fb_full.txt; K=$(dg_split .fb_full.txt); : > .fb_digest.txt; echo 1 > .fb_dg_i; echo digest > .stage
+      echo "ℹ️ 題目很長（約 $(est_tok < .fb_full.txt) token，考場 AI 一次看不完）：先分 $K 段請 AI 濃縮成重點，共要貼 $K 次。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+      print_digest 1 "$K"; rm -rf "$T"; exit 0
+    fi
     printf '%s\n' "$IN" > problem.txt; echo select > .stage
     TOPD=$(git rev-parse --show-toplevel 2>/dev/null)
     if [ -n "$TOPD" ] && [ -f "$TOPD/.srecruit/answer-files" ]; then   # 考場 repo：.srecruit/answer-files＝會被評分的檔案 → 寫進題目，fb 與 AI 都只改這些
