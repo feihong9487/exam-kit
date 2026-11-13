@@ -229,7 +229,7 @@ return
 fi
 cat <<'FB_PCODE'
 你是上機考解題助手。根據下面的【題目】寫出完整、單一檔案、可直接編譯的 C 程式（gcc -O2 -Wall -pthread，#include 要齊全），從 stdin 讀、寫到 stdout。
-規則：1. 輸出格式（空白、逗號、大小寫、換行）逐字照題目範例，不要多印任何文字。2. 【參考零件】只是參考，和題目不同時以題目為準。3. 數字、位元欄位、指令編碼不要心算，寫進程式。4. 有時間限制先估複雜度：N 到 10^5 以上要 O(N log N) 以下。題目附原始程式的，保留原本的輸入輸出與要求（例如必須用多執行緒）。5. 只輸出一個 ```c 程式碼區塊，程式裡不要寫註解（省長度），前面最多 2 行說明。
+規則：1. 輸出格式（空白、逗號、大小寫、換行）逐字照題目範例，不要多印任何文字。一筆一筆處理的題目：每一筆先把要印的值全部算好存起來、整筆檢查完，確定沒有錯誤才印這一行；任何一步出錯就只印題目規定的錯誤輸出（例如 ERR），不可以先印一半。2. 【參考零件】只是參考，和題目不同時以題目為準。3. 數字、位元欄位、指令編碼不要心算，寫進程式。4. 有時間限制先估複雜度：N 到 10^5 以上要 O(N log N) 以下。題目附原始程式的，保留原本的輸入輸出與要求（例如必須用多執行緒）。5. 只輸出一個 ```c 程式碼區塊，程式裡不要寫註解（省長度），前面最多 2 行說明。
 FB_PCODE
 grep -qiE '(用|使用|以)[[:space:]]*python|python[[:space:]]*3?[[:space:]]*(撰寫|實作|作答|寫)|in python' problem.txt && echo "（這題指定用 Python 3：忽略上面「C 程式／gcc」的要求，改成只輸出一個完整的 ${FENCE}python 程式碼區塊，用 python3 main.py 執行，從 stdin 讀、寫到 stdout。）"
 echo "【題目】"; cat problem.txt
@@ -445,7 +445,11 @@ case "$1" in
          SRC=""; for f in main.c main.cpp main.py; do [ -f "$f" ] && { SRC=$f; break; }; done
          [ "$(cat .mode 2>/dev/null)" = proj ] && [ -s .fb_target ] && SRC=$(cat .fb_target)
          [ -n "$SRC" ] || { echo "❌ 這個資料夾還沒有程式。先 cd 到那一題的資料夾（例如 cd ~/work/p1）再打 fb submit"; exit 1; }
-         [ "$(cat .stage 2>/dev/null)" = done ] || echo "⚠️ 這題在本機還沒出現 🎉；照樣交出去，但 CI 可能不會過。"
+         CPSRC="$SRC"; STG=$(cat .stage 2>/dev/null); PV=".fb_pass/$(basename "$SRC")"
+         if [ "$STG" != done ] && [ "$STG" != brute ]; then
+           if [ -f "$PV" ] && ! cmp -s "$PV" "$SRC"; then CPSRC="$PV"; echo "ℹ️ 目前的程式還沒通過範例，改交「之前通過範例的那一版」（$PV）。"
+           else echo "⚠️ 這題在本機還沒通過範例；照樣交出去，但 CI 可能不會過。"; fi
+         fi
          if ! command -v git >/dev/null 2>&1; then
            echo "❌ 這個終端機沒有 git（可能是在容器裡）。兩個辦法擇一："
            echo "   1) 到有 git 的終端機（考場電腦本身的終端機），照 Notion 步驟 5-3 手動交；要交的檔案是：$(pwd)/$SRC"
@@ -458,6 +462,7 @@ case "$1" in
          [ -n "$(git config --global credential.helper)" ] || git config --global credential.helper 'cache --timeout=36000'
          TOP=$(git rev-parse --show-toplevel 2>/dev/null)
          if [ -n "$TOP" ]; then R="$TOP"; D=$(realpath --relative-to="$TOP" "$SRC")   # fb 就在作答 repo 裡用：直接交這個檔
+           [ "$CPSRC" != "$SRC" ] && { cp "$SRC" .fb_wip 2>/dev/null; cp "$CPSRC" "$SRC"; echo "（已把 $SRC 換回通過範例的那一版；剛才還在改的版本存在 .fb_wip）"; }
            AFF="$R/.srecruit/answer-files"   # 考場 repo 的「會被評分的檔案」清單
            if [ -f "$AFF" ] && ! sed 's/\r$//' "$AFF" | grep -qxF -- "$D"; then
              C=$(sed 's/\r$//' "$AFF" | grep -E "\.${SRC##*.}\$"); CR=$(realpath --relative-to="$TOP" "$PWD")
@@ -501,7 +506,7 @@ case "$1" in
            fi
            [ -n "$D" ] || { echo "❌ 沒有檔名"; exit 1; }
            echo "$D" > .fb_dest
-           mkdir -p "$R/$(dirname "$D")" && cp "$SRC" "$R/$D" || { echo "❌ 複製失敗"; exit 1; }
+           mkdir -p "$R/$(dirname "$D")" && cp "$CPSRC" "$R/$D" || { echo "❌ 複製失敗"; exit 1; }
          fi
          cd "$R" || exit 1
          git add -u; git add -- "$D"
@@ -675,7 +680,7 @@ case "$1" in
          echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
-         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
+         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main .fb_best .fb_best_score brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
            [ -e "$f" ] && mv "$f" "$B/"; done
          if [ -d .fb_bak ]; then cp -r .fb_bak/. . && echo "（已還原考場原本的檔案：$(ls -A .fb_bak | tr '\n' ' ')）"; rm -rf .fb_bak; fi
          echo "已清空（舊檔在 $B）。開始新的一題：fb 然後貼上題目"; exit 0 ;;
@@ -907,6 +912,7 @@ FB_PYPROT
       cp "$T/b$PICK.body" "$TG"; echo "$TG" > .fb_target; echo "（已寫入 $TG，原檔備份在 .fb_bak/）" >&2
       OUT=$(PROJ=1 bash "$SELF" check "$TG")
     else
+      DUP=0; [ "$STAGE" = fix ] && [ -f "main.$EXT" ] && cmp -s "$T/b$PICK.body" "main.$EXT" && DUP=1   # 貼到和目前一模一樣的程式（複製到舊回答，或 AI 沒改）
       rm -f main.c main.cpp main.py; cp "$T/b$PICK.body" "main.$EXT"
       if [ "$MODE" = ros ]; then
         RT=$(cat .fb_target 2>/dev/null)
@@ -922,6 +928,22 @@ FB_PYPROT
       fi
     fi
     SF="main.$EXT"; [ "$MODE" = proj ] && SF="$TG"
+    if [ "${DUP:-0}" = 1 ]; then
+      echo "⚠️ 這次貼的程式和上一次一模一樣：可能複製到舊的回答（AI 網頁要等新回答出來再按複製），或 AI 沒有改。照樣把下面整段貼給 AI。" >&2
+      NOTE="（你上一次給的程式和【目前程式】一模一樣，完全沒有修改。這次一定要針對回報的錯誤實際修改程式。）"
+    fi
+    if [ "$MODE" != ros ] && ! printf '%s' "$OUT" | grep -q '全部通過'; then   # 只前進不後退：新版本通過的測資比之前少，就換回之前最好的版本再請 AI 改
+      SC=$(printf '%s' "$OUT" | grep -oE '測資：[0-9]+ / [0-9]+' | head -1 | grep -oE '[0-9]+' | head -1)
+      BS=$(cat .fb_best_score 2>/dev/null); BF=".fb_best/$(basename "$SF")"
+      if [ -n "$SC" ] && [ -n "$BS" ] && [ -f "$BF" ] && [ "$SC" -lt "$BS" ]; then
+        cp "$BF" "$SF"
+        echo "↩️ 這一版只過 $SC 組測資，比之前的 $BS 組更差：已自動換回之前比較好的版本。" >&2
+        NOTE="（你上一次的修改讓通過的測資從 $BS 組掉到 $SC 組，改壞了；已經還原成修改前的版本，就是下面的【目前程式】。這次換一個改法，只針對下面回報的那一個錯誤改，其他地方不要動。）"
+        if [ "$MODE" = proj ]; then OUT=$(PROJ=1 bash "$SELF" check "$SF"); else OUT=$(bash "$SELF" check "$SF"); fi
+      elif [ -n "$SC" ] && { [ -z "$BS" ] || [ "$SC" -ge "$BS" ]; }; then
+        mkdir -p .fb_best; cp "$SF" "$BF"; echo "$SC" > .fb_best_score
+      fi
+    fi
     NOIN=1; for f in tests/*.in; do [ -s "$f" ] && NOIN=0; done   # 所有測資輸入都是空的（程式不讀輸入）：對拍沒意義，不做
     printf '%s' "$OUT" | grep -q '全部通過' && { mkdir -p .fb_pass; cp "$SF" ".fb_pass/$(basename "$SF")"; }   # 保留最後一個「目前測資全過」的版本（之後越改越壞時可以拿回來交）
     if ! printf '%s' "$OUT" | grep -q '全部通過' && [ -f ".fb_pass/$(basename "$SF")" ] && printf '%s' "$OUT" | grep -qE '第一筆失敗：[0-9]+\.in'; then
@@ -932,7 +954,7 @@ FB_PYPROT
         stress_run; stress_after $? "$SF"
       else
         echo brute > .stage
-        echo "✅ 範例都過了。接著做「對拍」找隱藏測資的錯：把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
+        echo "✅ 範例都過了！考試時：現在就先打 fb submit 交一版，看 GitLab 的評分（綠勾＝這題完成，打 fb skip 收工）。" >&2; echo "   想更保險、或評分是紅叉，再做「對拍」找隱藏的錯：把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
         print_brute
       fi
     elif printf '%s' "$OUT" | grep -q '全部通過'; then
@@ -1104,8 +1126,12 @@ else
             if (p == q) printf "👉 這一行只差在「空白」：內容都對，請只改 printf 的格式字串，讓空白位置和預期一模一樣（␣ 是空白；例如逗號後面要不要空格）。不要改其他邏輯。\n"
             else if (pp == qq) printf "👉 這一行只差在「標點符號」（例如少了或多了逗號）：內容都對，請只改 printf 的格式字串，讓標點和空白跟預期逐字相同。不要改其他邏輯。\n"
             else if (tolower(a) == tolower(b)) printf "👉 這一行只差在「大小寫」：請只改 printf 的格式字串或字串表的大小寫。不要改其他邏輯。\n"
+            else if (i <= ne && i <= ng && a ~ /^[A-Za-z_ ]+$/ && b ~ /[0-9]/ && index(b, a) == 0)
+              printf "👉 這一行預期是題目規定的特殊輸出「%s」，你卻印了一般資料「%s」：程式沒有偵測到這一筆的錯誤條件，或偵測到之前就已經把前面的值印出去了。改法：這一行要印的值先全部存進變數或陣列，整筆讀完、確認沒有任何錯誤才印；任何一步出錯就只印「%s」。具體寫法（C）：每一筆開頭宣告 char line[1024]; int n = 0, bad = 0; 原本每個 printf(...) 都改成 n += snprintf(line + n, sizeof line - n, ...)（先不印）；任何讀取或檢查失敗就 bad = 1；這一筆處理完才 if (bad) puts(\"%s\"); else puts(line);。Python 則用 list 收集，最後才 print。\n", a, b, a, a
+            else if (i <= ne && i <= ng && b ~ /^[A-Za-z_ ]+$/ && a ~ /[0-9]/ && index(a, b) == 0)
+              printf "👉 這一行是正常資料（預期「%s」），你卻印了「%s」：錯誤條件寫得太嚴，把正常的輸入也判成錯誤。找出印「%s」的每一個 if，逐條對照題目「什麼情況才算錯」，把題目沒有規定的條件拿掉（例如資料後面還有剩下的補零位元、長度不是剛好用完，都不算錯）。\n", a, b, b
             else if (i <= ne && i <= ng && length(a) > 0 && length(b) > length(a) && substr(b, length(b) - length(a) + 1) == a)
-              printf "👉 你的這一行「開頭多印了」「%s」，後面才是正確的「%s」。通常是：還沒確認這一筆資料全部有效，就先印出了一部分（例如先印欄位、讀到一半才發現錯誤再印 %s）。改法：先把這一行要印的所有值算好存進變數或陣列，整筆都檢查完沒有錯誤才一次印出；有錯誤就只印「%s」，前面什麼都不要印。\n", substr(b, 1, length(b) - length(a)), a, a, a
+              printf "👉 你的這一行「開頭多印了」「%s」，後面才是正確的「%s」。通常是：還沒確認這一筆資料全部有效，就先印出了一部分（例如先印欄位、讀到一半才發現錯誤再印 %s）。改法：先把這一行要印的所有值算好存進變數或陣列，整筆都檢查完沒有錯誤才一次印出；有錯誤就只印「%s」，前面什麼都不要印。具體寫法（C）：每一筆開頭宣告 char line[1024]; int n = 0, bad = 0; 原本每個 printf(...) 都改成 n += snprintf(line + n, sizeof line - n, ...)（先不印）；任何讀取或檢查失敗就 bad = 1；這一筆處理完才 if (bad) puts(\"%s\"); else puts(line);。Python 則用 list 收集，最後才 print。\n", substr(b, 1, length(b) - length(a)), a, a, a, a
             else if (i <= ne && i <= ng && length(a) > 0 && length(b) > length(a) && substr(b, 1, length(a)) == a)
               printf "👉 你的這一行前面都對，但「結尾多印了」「%s」。把多印的部分拿掉（檢查是不是多跑了一次迴圈、或錯誤時又多印了東西）。\n", substr(b, length(a) + 1)
             else if (i <= ne && i <= ng && length(b) > 0 && length(a) > length(b) && substr(a, 1, length(b)) == b)
