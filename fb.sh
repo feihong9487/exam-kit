@@ -569,7 +569,9 @@ case "$1" in
            mkdir -p "$R/$(dirname "$D")" && cp "$CPSRC" "$R/$D" || { echo "❌ 複製失敗"; exit 1; }
          fi
          cd "$R" || exit 1
-         git add -u; git add -- "$D"
+         if [ -f "$R/.srecruit/answer-files" ]; then   # 考場 repo：只交「會被評分的檔案」，不動其他檔（例如考場給的 tests/、Makefile、.gitlab-ci.yml）
+           git add -- "$D"; sed 's/\r$//' "$R/.srecruit/answer-files" | grep -v '^[[:space:]]*$' | while read -r a; do [ -f "$a" ] && git add -- "$a"; done
+         else git add -u; git add -- "$D"; fi
          if git diff --cached --quiet; then echo "ℹ️ 內容和上次交的一樣（沒有新的變更），直接再推一次"
          else git commit -q -m "submit $(date +%H:%M)" || { echo "❌ commit 失敗"; exit 1; }; fi
          git push || { echo "（被拒絕，先把 GitLab 上的新變更拉下來再推）"; git pull --no-rebase --no-edit && git push; } || { echo "❌ push 失敗：帳號密碼錯，或網路不通。再打一次 fb submit"; exit 1; }
@@ -881,6 +883,9 @@ case "$STAGE" in
       [ -z "$y" ] && BADC=1   # AI 給了空的範例輸出（常見於「沒有輸入、直接執行」的題目）
     done
     for j in $(seq $((k+1)) 99); do rm -f "tests/$j.in" "tests/$j.out"; done
+    for f in .fb_bak/tests/*.in; do   # 考場資料夾原本就附的測資（.in／.out 成對）也一起用，檔名加 x_ 避免和範例撞名
+      [ -f "$f" ] && [ -f "${f%.in}.out" ] && { cp "$f" "tests/x_$(basename "$f")"; cp "${f%.in}.out" "tests/x_$(basename "${f%.in}").out"; XT=$((${XT:-0}+1)); }
+    done; [ "${XT:-0}" -gt 0 ] && echo "ℹ️ 另外加入考場資料夾原本附的 $XT 組測資" >&2
     if [ "$k" -eq 0 ] || [ "$BADC" -eq 1 ]; then   # 備案：fb 自己從題目抓範例
       ke=$(extract_samples "$T/ex")
       if [ "${ke:-0}" -gt 0 ]; then rm -rf tests; mkdir -p tests
