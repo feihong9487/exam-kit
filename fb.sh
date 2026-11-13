@@ -278,15 +278,15 @@ stress_run() {   # 回傳 0=沒找到反例  1=找到反例（寫進 tests/s<k>�
 }
 stress_after() {   # $1=stress_run 的結果；$2=程式檔
   case "$1" in
-    1) echo fix > .stage; echo "❌ 對拍找到範例沒抓到的錯誤。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+    1) echo fix > .stage; echo "❌ 對拍找到範例沒抓到的錯誤。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
        echo "（注意：名稱是 s 開頭的測資是隨機產生的，預期輸出來自另一個確定正確的暴力解，請相信它，照它修正。）"
        if [ "$(cat .mode 2>/dev/null)" = proj ]; then PROJ=1 bash "$SELF" check "$2"; else bash "$SELF" check "$2"; fi ;;
-    3) echo fix > .stage; echo "❌ 範例都對，但最大規模輸入逾時。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+    3) echo fix > .stage; echo "❌ 範例都對，但最大規模輸入逾時。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
        echo "【修正任務】你是上機考解題助手。下面的程式答案正確，但題目允許的最大規模輸入執行超過 ${TO:-5} 秒被中止（太慢）。請先用一句話說目前的時間複雜度，再改用更快的演算法（N 到 10^5 以上要 O(N log N) 以下；輸入輸出用 scanf／printf，大量輸出不要每行 fflush），輸入輸出格式不變，給完整程式（只給一個程式碼區塊，不要註解）。"
        echo "【題目】"; prob_wo "$2"; echo; echo "【目前程式】"; echo '```'; cat "$2"; echo '```' ;;
     2) if [ ! -f .fb_brute_retry ]; then   # 暴力解不可信：再請 AI 重寫一次暴力解（只重試一次）
          touch .fb_brute_retry; rm -f brute.py gen.py; echo brute > .stage; F0=$(cat .fb_bf 2>/dev/null)
-         echo "⚠️ 暴力解或產生器不可信，不能拿來對拍。把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "--------" >&2
+         echo "⚠️ 暴力解或產生器不可信，不能拿來對拍。把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          if [ -f .fb_genbad ]; then
            echo "（上一次的產生器產生的輸入格式不對，暴力解跑出來全是空的。產生器印出的例子（前 4 行）："; head -n 4 .fb_genbad | cut -c1-120
            echo "題目範例輸入（前 4 行）："; head -n 4 tests/1.in 2>/dev/null | cut -c1-120
@@ -529,7 +529,7 @@ case "$1" in
          [ -n "$CMDS" ] && { echo "ℹ️ CI 執行的指令（檔名要對得上）：" >&2; printf '%s\n' "$CMDS" | sed 's/^/   /' >&2; }
          echo fix > .stage; rm -f .fb_sig .fb_n
          LT=c; case "$SRC" in *.py) LT=python ;; *.cpp) LT=cpp ;; esac
-         echo "✅ 已讀 CI 的 log（留最後 $(printf '%s\n' "$LOG" | grep -c .) 行重點）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+         echo "✅ 已讀 CI 的 log（留最後 $(printf '%s\n' "$LOG" | grep -c .) 行重點）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          echo "【修正任務】你是上機考解題助手。這個程式在本機的範例測資都通過了，但交到 GitLab 後自動評分（CI）沒有過。下面是題目、目前的程式和 CI 的 log。先用兩句話說 CI 為什麼沒過（常見：隱藏測資的邊界情況、輸出多印或少印、太慢超時、編譯警告被當成錯誤、檔名或讀檔方式和題目不同、Python 版本），再給修正後的完整程式（只給一個程式碼區塊，程式裡不要寫註解）。輸出格式逐字照題目範例；不要心算。"
          echo "【題目】"; cat problem.txt; echo
          [ -f pack.txt ] && { echo "【參考零件】（只是參考；只附前 12 行）"; head -n 12 pack.txt; echo; }
@@ -585,7 +585,7 @@ case "$1" in
            [ -n "$TOPD" ] && [ -f "$TOPD/.srecruit/answer-files" ] && sed 's/\r$//' "$TOPD/.srecruit/answer-files" | grep -v '^[[:space:]]*$' | while read -r a; do realpath -m --relative-to="$PWD" "$TOPD/$a"; done > .task_af   # 會被評分的檔案
            GD=$(git rev-parse --git-dir 2>/dev/null) && for x in '.task*' '.fb_*' '.fb_task_bak/' '.stage' '.sid' '.mode' '.pack_manual' 'pack.txt' 'problem.txt' 'node.log' 'verify.out'; do   # fb 的暫存檔不要被 git add -A 交出去（只寫在本機 .git/info/exclude）
              grep -qxF "$x" "$GD/info/exclude" 2>/dev/null || echo "$x" >> "$GD/info/exclude"; done
-           echo "✅ 已存任務（任務模式）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+           echo "✅ 已存任務（任務模式）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
            task_prompt; exit 0
          fi
          T=$(mktemp -d); printf '%s\n' "$IN" > "$T/in.txt"; split_blocks "$T"; NB=$(cat "$T/count")
@@ -620,13 +620,13 @@ case "$1" in
          done
          DONE=0; grep -q '【完成】' "$T/in.txt" && DONE=1
          if [ -z "$FILES" ] && [ ! -s "$T/cmd.sh" ]; then
-           if [ -n "$WARN" ]; then printf '%s' "$WARN" > .task_last; echo "⚠️ $WARN把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
+           if [ -n "$WARN" ]; then printf '%s' "$WARN" > .task_last; echo "⚠️ $WARN把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
            if [ $DONE -eq 1 ] && R=$(done_ok) && [ -n "$R" ]; then
              { echo "$R"; cat .task_last 2>/dev/null; } > "$T/l" && mv "$T/l" .task_last
-             echo "⚠️ AI 說完成了，但 fb 檢查還沒完成：$R" >&2; echo "把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
+             echo "⚠️ AI 說完成了，但 fb 檢查還沒完成：$R" >&2; echo "把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
            if [ $DONE -eq 1 ]; then echo done > .task_stage; echo "✅ AI 說任務完成了：$(grep -m1 '【完成】' "$T/in.txt" | cut -c1-150)" >&2
              echo "👉 自己確認一下結果（例如 fb test、make、看檔案）；要交卷就打 fb submit，或照考場規定 git add／commit／push。" >&2; rm -rf "$T"; exit 0; fi
-           echo "⚠️ AI 的回覆裡沒有「FILE: 路徑」的檔案，也沒有 bash 指令。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+           echo "⚠️ AI 的回覆裡沒有「FILE: 路徑」的檔案，也沒有 bash 指令。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
            echo "（上一次你沒有照格式回答${SKIP:+：你給的程式碼區塊沒有寫「FILE: 路徑」，我不知道要存到哪個檔案}。請照規則給下一步。）"; task_prompt; rm -rf "$T"; exit 0
          fi
          echo "======== AI 要做的事 ========" >&2
@@ -672,7 +672,7 @@ case "$1" in
            if [ -n "$R" ]; then echo "$R" >> .task_last; echo "⚠️ AI 說完成了，但 fb 檢查還沒完成：$R" >&2
            else echo done > .task_stage; echo "✅ AI 說任務完成了。自己確認一下結果；要交卷就打 fb submit。" >&2; rm -rf "$T"; exit 0; fi
          fi
-         echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+         echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb task 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
          task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
          for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
@@ -694,7 +694,7 @@ case "$1" in
          echo "測資的輸入輸出方式：$(tr '\n' ' ' < .fb_io 2>/dev/null)$( [ -f .fb_io ] || echo 'stdin → stdout')"; exit 0 ;;
   mode)  case "$2" in std|ros|proj) echo "$2" > .mode; echo "已改成題型：$2" >&2 ;; *) echo "用法：fb mode std（一般）｜ros（ROS 2）｜proj（多檔案專案＋Makefile）"; exit 1 ;; esac
          if [ "$(cat .stage 2>/dev/null)" = select ]; then
-           echo "把下面整段複製，到 AI 開新對話貼上（取代剛才那段）：" >&2; echo "--------" >&2
+           echo "把下面整段複製，到 AI 開新對話貼上（取代剛才那段）：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
            if [ "$2" = ros ]; then print_select_ros; else print_select; fi
          fi; exit 0 ;;
 esac
@@ -746,7 +746,7 @@ case "$STAGE" in
     [ -n "$FO" ] && echo "IO_OUT=$FO" >> .fb_io
     [ -f .fb_io ] && echo "ℹ️ 這題的輸入輸出不是 stdin/stdout：$(tr '\n' ' ' < .fb_io)（判斷錯就打 fb io std）" >&2
     case "$(cat .mode)" in ros) MN='ROS 2' ;; proj) MN="考場起始檔專案（$( [ -f Makefile ] || [ -f makefile ] && echo '用 make 編譯' || echo '沒有 Makefile，用 gcc 編譯')；AI 會直接改起始檔）" ;; *) MN='一般輸入輸出' ;; esac
-    echo "✅ 已存題目（題型：$MN；判斷錯了就打 fb mode std／fb mode ros／fb mode proj）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+    echo "✅ 已存題目（題型：$MN；判斷錯了就打 fb mode std／fb mode ros／fb mode proj）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
     if [ "$(cat .mode)" = ros ]; then print_select_ros; else print_select; fi
     TK=$(python3 -c 'import sys; t=open("problem.txt",encoding="utf-8",errors="replace").read(); c=sum(1 for ch in t if ord(ch)>0x2e7f); print(c+(len(t)-c)//3)' 2>/dev/null)
     [ "${TK:-0}" -gt 2200 ] && echo "⚠️ 題目（含附檔）約 $TK token，考場 AI 一次只能看約 4096 token，之後加上程式和回報會被截掉。建議 fb reset，重貼時只留「要做什麼＋輸入輸出格式＋範例」，刪掉背景說明、安裝步驟、和這題無關的段落。" >&2 ;;
@@ -764,7 +764,7 @@ case "$STAGE" in
       echo write > .stage
       echo "✅ 驗收腳本：$( [ -s verify.sh ] && echo 有 || echo 沒有)；預期輸出：$( [ -s expected.txt ] && echo "$(grep -c . expected.txt) 行" || echo 沒有)；情境：${SID:-無}。把下面整段複製，到 AI 開新對話貼上：" >&2
       [ -s verify.sh ] || echo "⚠️ AI 沒給驗收腳本；之後只能檢查節點有沒有正常啟動。" >&2
-      echo "--------" >&2
+      echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
       print_write_ros; rm -rf "$T"; exit 0
     fi
     rm -rf tests; mkdir -p tests; k=0; kin=0; kout=0
@@ -800,7 +800,7 @@ case "$STAGE" in
     echo write > .stage
     echo "✅ 建了 $k 組測資；情境：${SID:-無}。把下面整段複製，到 AI 開新對話貼上：" >&2
     [ "$k" -eq 0 ] && echo "⚠️ AI 沒照格式抄範例，所以沒有測資；之後只能直接執行看輸出。" >&2
-    echo "--------" >&2
+    echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
     print_write ;;
   brute)   # 收暴力解＋產生器 → 對拍
     BR=""; GE=""
@@ -818,7 +818,7 @@ case "$STAGE" in
       echo "（暴力解和產生器寫在同一個區塊，已從「# 產生器」那行切開）" >&2
     fi
     if [ -z "$BR" ] || [ -z "$GE" ]; then
-      echo "⚠️ 沒拿到兩個 Python 區塊（暴力解＋產生器）。把下面整段複製，到 AI 開新對話貼上（或打 fb skip 略過對拍）：" >&2; echo "--------" >&2
+      echo "⚠️ 沒拿到兩個 Python 區塊（暴力解＋產生器）。把下面整段複製，到 AI 開新對話貼上（或打 fb skip 略過對拍）：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
       echo "（上一次你沒有給兩個 ${FENCE}python 區塊。第一個是暴力解，第二個是產生器。）"; print_brute; rm -rf "$T"; exit 0
     fi
     cp "$T/b$BR.body" brute.py; cp "$T/b$GE.body" gen.py
@@ -846,7 +846,7 @@ case "$STAGE" in
       [ $s -ge $PS ] && { PICK=$i; EXT=$e; PS=$s; }
     done
     if [ -z "$PICK" ]; then
-      echo "⚠️ AI 的回覆裡沒有程式碼區塊。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+      echo "⚠️ AI 的回覆裡沒有程式碼區塊。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
       if [ "$MODE" = ros ]; then echo "（上一次你沒有給程式碼。請只給一個完整的 ${FENCE}python 程式碼區塊。）"; print_write_ros
       else echo "（上一次你沒有給程式碼。請只給一個完整、可編譯的 ${FENCE}c 程式碼區塊。）"; print_write; fi; exit 0
     fi
@@ -857,7 +857,7 @@ case "$STAGE" in
       [ "$EXT" != py ] && awk '{a[NR]=$0} /}[ \t]*$/{e=NR} END{for(i=1;i<=(e?e:NR);i++)print a[i]}' "$T/b$PICK.body" > "$T/cut" && cp "$T/cut" "$T/b$PICK.body"
     fi
     if [ "$EXT" = cpp ] && ! command -v g++ >/dev/null 2>&1; then
-      echo "⚠️ AI 給的是 C++，但這個環境沒有 g++。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+      echo "⚠️ AI 給的是 C++，但這個環境沒有 g++。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
       echo "（上一次你給的是 C++，但考場環境只有 gcc（C 語言），沒有 g++。請改寫成 C：不能用 iostream、vector、string 類別、std::。）"; print_write; rm -rf "$T"; exit 0
     fi
     if [ "$MODE" = proj ]; then   # 多檔案專案：寫回 AI 指定的那個檔案，用 make 編譯
@@ -867,7 +867,7 @@ case "$STAGE" in
       [ -z "$TG" ] && TG=$(cat .fb_target 2>/dev/null)
       if [ -n "$TG" ] && [ ! -f "$TG" ]; then F2=$(find . -maxdepth 2 -name "$(basename "$TG")" ! -path './.fb*' | pick_by_problem); [ -n "$F2" ] && TG=${F2#./}; fi
       if [ -z "$TG" ] || [ ! -f "$TG" ]; then
-        echo "⚠️ 看不出 AI 要改哪個檔案。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+        echo "⚠️ 看不出 AI 要改哪個檔案。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
         echo "（上一次你沒有標出要改的檔案，或檔名不存在。程式碼區塊第一行一定要寫 // FILE: 檔名，檔名必須是專案裡已有的檔案：$(find . -maxdepth 2 -name '*.[ch]' ! -path './.fb*' | sed 's#^\./##' | tr '\n' ' ')）"; print_write; rm -rf "$T"; exit 0
       fi
       PROT=$(python3 - <<'FB_PYPROT'
@@ -891,7 +891,7 @@ FB_PYPROT
         done
       fi
       if isprot "$TG"; then
-        echo "⚠️ AI 改的是題目說不能改的 $TG，沒有寫入。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+        echo "⚠️ AI 改的是題目說不能改的 $TG，沒有寫入。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
         echo "（上一次你改了 $TG，但題目說不能改：$PROT。請改題目要求的檔案$( [ -s .fb_target ] && echo "（$(cat .fb_target)）")，區塊第一行寫 // FILE: 那個檔名。）"; print_write; rm -rf "$T"; exit 0
       fi
       for i in $(seq 1 "$NB"); do   # AI 一次改了好幾個檔案（每個區塊都有 FILE:）：其他檔案也寫入（題目說不能改的除外）
@@ -932,7 +932,7 @@ FB_PYPROT
         stress_run; stress_after $? "$SF"
       else
         echo brute > .stage
-        echo "✅ 範例都過了。接著做「對拍」找隱藏測資的錯：把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "--------" >&2
+        echo "✅ 範例都過了。接著做「對拍」找隱藏測資的錯：把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
         print_brute
       fi
     elif printf '%s' "$OUT" | grep -q '全部通過'; then
@@ -943,7 +943,7 @@ FB_PYPROT
       echo "⚠️ 沒有測資可以自動比對：程式已編譯、執行結束碼 0（輸出在上面）。請自己對照題目看輸出合不合理；要繼續修就把上面整段貼給 AI，再用 fb test 檢查。" >&2
     else
       echo fix > .stage
-      echo "❌ 還沒過。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+      echo "❌ 還沒過。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "（AI 回答後：先打 fb 按 Enter，看到「👉 請貼上」才貼上）" >&2; echo "--------" >&2
       [ -n "$NOTE" ] && echo "$NOTE"
       printf '%s\n' "$OUT"
     fi ;;
@@ -1104,6 +1104,12 @@ else
             if (p == q) printf "👉 這一行只差在「空白」：內容都對，請只改 printf 的格式字串，讓空白位置和預期一模一樣（␣ 是空白；例如逗號後面要不要空格）。不要改其他邏輯。\n"
             else if (pp == qq) printf "👉 這一行只差在「標點符號」（例如少了或多了逗號）：內容都對，請只改 printf 的格式字串，讓標點和空白跟預期逐字相同。不要改其他邏輯。\n"
             else if (tolower(a) == tolower(b)) printf "👉 這一行只差在「大小寫」：請只改 printf 的格式字串或字串表的大小寫。不要改其他邏輯。\n"
+            else if (i <= ne && i <= ng && length(a) > 0 && length(b) > length(a) && substr(b, length(b) - length(a) + 1) == a)
+              printf "👉 你的這一行「開頭多印了」「%s」，後面才是正確的「%s」。通常是：還沒確認這一筆資料全部有效，就先印出了一部分（例如先印欄位、讀到一半才發現錯誤再印 %s）。改法：先把這一行要印的所有值算好存進變數或陣列，整筆都檢查完沒有錯誤才一次印出；有錯誤就只印「%s」，前面什麼都不要印。\n", substr(b, 1, length(b) - length(a)), a, a, a
+            else if (i <= ne && i <= ng && length(a) > 0 && length(b) > length(a) && substr(b, 1, length(a)) == a)
+              printf "👉 你的這一行前面都對，但「結尾多印了」「%s」。把多印的部分拿掉（檢查是不是多跑了一次迴圈、或錯誤時又多印了東西）。\n", substr(b, length(a) + 1)
+            else if (i <= ne && i <= ng && length(b) > 0 && length(a) > length(b) && substr(a, 1, length(b)) == b)
+              printf "👉 你的這一行前面都對，但「少印了結尾」「%s」。檢查迴圈次數、或是不是提早 break。\n", substr(a, length(b) + 1)
             exit
           }
         }
