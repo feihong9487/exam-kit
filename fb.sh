@@ -6,6 +6,7 @@
 # 其他指令：./fb.sh selfcheck（檢查環境）
 #          ./fb.sh submit（交卷：放進 GitLab 作答 repo 並 push）
 #          ./fb.sh ci（GitLab CI 沒過：貼 job log 產生修正任務）
+#          ./fb.sh task（任務模式：要下指令觀察、改設定、解 git 衝突等不是寫程式的題目）
 #          ./fb.sh reset（換下一題，清空這個資料夾的狀態）
 #          ./fb.sh test（不貼東西，直接重跑目前的程式）
 #          ./fb.sh pack S06（手動換情境包）
@@ -36,6 +37,9 @@ pick_by_problem() {   # stdin 有好幾個路徑時挑一個：檔名等於 $1 >
   done
   echo "${best:-$first}"
 }
+prob_wo() {   # 印 problem.txt，但拿掉附檔裡「目前程式」那個檔案的原始版本（下面會附目前版本，不用重複佔 context）
+  awk -v t="【專案檔案 $1】" '$0==t {s=1; f=0; next} s && /^```/ {f++; if (f==2) s=0; next} !s' problem.txt 2>/dev/null
+}
 
 if [ "$1" = "checkros" ]; then
   LIMIT=1800; VER="${VERIFY:-verify.sh}"; EXPF="${EXPECT:-expected.txt}"
@@ -45,10 +49,12 @@ if [ "$1" = "checkros" ]; then
   LIB=$(mktemp)
   cat > "$LIB" <<'FB_ROSLIB'
 _f() { echo "${FBROS:-/tmp}/fbros_$(echo "$1" | tr '/' '_')"; }
-grab() { timeout 12 ros2 topic echo "$1" > "$(_f "$1")" 2>&1 & GRAB_PIDS="$GRAB_PIDS $!"; sleep 2; }
-send() { timeout 10 ros2 topic pub --once -w 1 "$1" "$2" "$3" > /dev/null 2>&1 || echo "（send $1 失敗：沒有節點訂閱 $1，或型別／YAML 寫錯）"; sleep 0.7; }
-show() { sleep 1; for p in $GRAB_PIDS; do kill -INT "$p" 2>/dev/null; done; wait $GRAB_PIDS 2>/dev/null; GRAB_PIDS=""; echo "== $1 收到："; grep -vE '^---$|WARNING|does not appear' "$(_f "$1")" | head -40; }
-call() { echo "== call $1："; timeout 12 ros2 service call "$1" "$2" "$3" 2>&1 | tail -3 | _yaml; }
+_hs() { [ -n "$FB_HELPERS" ] && [ ! -f "$FBROS/hs" ] || return 0; touch "$FBROS/hs"; for h in $FB_HELPERS; do if [ "$h" = main.py ]; then python3 main.py >> node.log 2>&1 & else python3 "$h" >> "$FBROS/helper.log" 2>&1 & fi; echo $! >> "$FBROS/hs"; disown; done; sleep 4; }   # 節點（main.py 和題目給的 publisher.py 等）等 grab 都準備好才（重新）啟動：timer 一開始發的 data: 10、11、12 才收得到
+grab() { local t="/${1#/}" ty; ty=$(awk -v t="$t" '$1==t {gsub(/[][]/, "", $2); print $2}' "$FBROS/types" 2>/dev/null | head -1)   # 型別用第一次啟動時記下的（節點還沒重新啟動時 topic 不存在，echo 要給型別）
+  timeout 45 ros2 topic echo "$1" $ty > "$(_f "$1")" 2>&1 & GRAB_PIDS="$GRAB_PIDS $!"; sleep 2; }
+send() { _hs; timeout 10 ros2 topic pub --once -w 1 "$1" "$2" "$3" > /dev/null 2>&1 || echo "（send $1 失敗：沒有節點訂閱 $1，或型別／YAML 寫錯）"; sleep 0.7; }
+show() { _hs; sleep 1; for p in $GRAB_PIDS; do kill -INT "$p" 2>/dev/null; done; [ -n "$GRAB_PIDS" ] && wait $GRAB_PIDS 2>/dev/null; GRAB_PIDS=""; echo "== $1 收到："; grep -vE '^---$|WARNING|does not appear' "$(_f "$1")" | head -40; }
+call() { _hs; echo "== call $1："; timeout 12 ros2 service call "$1" "$2" "$3" 2>&1 | tail -3 | _yaml; }
 _yaml() { python3 -c 'import re,sys
 for l in sys.stdin:
     l = l.rstrip("\n"); print(l)
@@ -63,10 +69,15 @@ FB_ROSLIB
   if ! python3 -m py_compile main.py 2> "$REP.err"; then
     say "結果：Python 語法錯誤"; head -n 8 "$REP.err" | cut -c1-160 >> "$REP"; ROSPASS=0
   else
+    FB_HELPERS=""; P0=$(sed '/^【專案裡的檔案】/,$d' problem.txt 2>/dev/null)
+    for h in $(find . -maxdepth 2 -name '*.py' ! -name main.py ! -name brute.py ! -name gen.py ! -path './.fb*' 2>/dev/null | sed 's#^\./##'); do   # 題目附的其他節點（例如 publisher.py）也一起跑，像考場說的「開兩個終端機」
+      [ "$h" = "$(cat .fb_target 2>/dev/null)" ] && continue; grep -q rclpy "$h" && [[ "$P0" == *"$(basename "$h")"* ]] || continue
+      FB_HELPERS="$FB_HELPERS $h"; say "（驗收時會同時啟動題目給的節點 $h：驗收腳本第一個 send／show／call 之前才啟動，所以 grab 收得到它最前面的訊息）"
+    done; export FB_HELPERS
     python3 main.py > node.log 2>&1 & NP=$!
     sleep 4
     if kill -0 "$NP" 2>/dev/null; then ALIVE=1; else ALIVE=0; fi
-    say "--- 節點啟動 4 秒後的 ROS 圖 ---"
+    say "--- 節點啟動 4 秒後的 ROS 圖 ---"; ros2 topic list -t > "$FBROS/types" 2>/dev/null
     say "節點：$(ros2 node list 2>/dev/null | tr '\n' ' ')"
     for t in $(ros2 topic list 2>/dev/null | grep -vE '^/(rosout|parameter_events)$'); do
       I=$(ros2 topic info "$t" 2>/dev/null)
@@ -75,22 +86,28 @@ FB_ROSLIB
     S2=$(ros2 service list 2>/dev/null | grep -vE '/(describe|get|list|set)_parameters|parameter_types|type_description' | tr '\n' ' ')
     [ -n "$S2" ] && say "service：$S2"
     if [ $ALIVE -eq 1 ] && [ -s "$VER" ]; then
-      timeout 60 bash -c "source '$LIB'; source '$VER'" > verify.out 2>&1
+      kill -INT "$NP" 2>/dev/null; sleep 1.5; kill -9 "$NP" 2>/dev/null; wait "$NP" 2>/dev/null   # 看完 ROS 圖先停掉；驗收腳本 grab 好之後再重新啟動
+      mv node.log node1.log; : > node.log; export FB_HELPERS="main.py$FB_HELPERS"
+      timeout 90 bash -c "source '$LIB'; source '$VER'" > verify.out 2>&1
+      HP=$(cat "$FBROS/hs" 2>/dev/null | grep -E '^[0-9]+$' | paste -sd' ')
       say "--- 驗收腳本輸出（前 25 行）---"; head -n 25 verify.out | cut -c1-160 >> "$REP"
       [ -s verify.out ] || say "⚠️ 驗收腳本什麼都沒印（沒有 show／call，或 show 的 topic 名稱打錯）→ 問題在【驗收腳本】，不一定在節點；請一起附上修正後的【驗收腳本】。"
     elif [ $ALIVE -eq 1 ]; then say "（沒有驗收腳本，只檢查節點有沒有正常啟動）"; : > verify.out; fi
-    kill -INT "$NP" 2>/dev/null; sleep 2; kill -9 "$NP" 2>/dev/null
+    LB=$(wc -l < node.log)   # Ctrl-C 之前的行數：之前就有 Traceback＝執行中出錯
+    kill -INT "$NP" $HP 2>/dev/null; sleep 2; kill -9 "$NP" $HP 2>/dev/null
     ROSPASS=1
     [ $ALIVE -eq 0 ] && { say "❌ 節點啟動後就結束了（可能程式出錯或沒有 spin）"; ROSPASS=0; }
-    if grep -q "Traceback" node.log; then
-      say "❌ 節點有錯誤（Traceback；若是在 Ctrl-C 之後才出現，代表沒有處理 ExternalShutdownException）"; ROSPASS=0
+    if head -n "$LB" node.log | grep -q "Traceback"; then
+      say "❌ 節點執行中出錯（Traceback）"; ROSPASS=0
+    elif tail -n +"$((LB+1))" node.log | grep -q "Traceback" && ! tail -n +"$((LB+1))" node.log | grep -qE 'context is not valid|rcl_shutdown'; then   # rclpy 收到 Ctrl-C 時偶發的 RCLError（context is not valid）不算程式的錯
+      say "❌ 節點在 Ctrl-C 之後出現 Traceback（代表沒有處理 ExternalShutdownException）"; ROSPASS=0
     fi
     if [ -s "$EXPF" ] && [ $ALIVE -eq 1 ]; then
       # 每一行預期輸出要在驗收輸出裡「完整出現」：忽略引號與頭尾空白；開頭結尾是英數字時不能接著別的數字（data: 3.0 不會被 data: 3.05、13.0 當成有）
       MISS=$(python3 - "$EXPF" verify.out <<'FB_PYMATCH'
 import re, sys
 rd = lambda f: open(f, encoding="utf-8", errors="replace").read().splitlines()
-q = lambda s: s.strip().replace("'", "").replace('"', "")
+q = lambda s: re.sub(r"\b(True|False)\b", lambda m: m.group(1).lower(), s.strip().replace("'", "").replace('"', ""))   # Python 的 True／False 和 ros2 echo 的 true／false 視為相同
 out = [q(l) for l in rd(sys.argv[2])]
 for L in rd(sys.argv[1]):
     L2 = q(L)
@@ -118,7 +135,7 @@ FB_PYMATCH
     else
       echo "【修正任務】你是上機考解題助手（ROS 2 Jazzy，rclpy）。下面是題目、驗收腳本、預期輸出、目前的程式和執行回報。先用一句話說錯在哪、為什麼，再給修正後的完整程式（只給一個 ${FENCE:-\`\`\`}python 區塊，不要寫註解）。常見原因：topic 名稱或型別和題目不同、忘了 publish、callback 沒被呼叫、沒處理 ExternalShutdownException。"
     fi
-    echo "【題目】"; cat problem.txt; echo
+    echo "【題目】"; if [ "$N" -lt 2 ] && [ -s .fb_target ]; then prob_wo "$(cat .fb_target)"; else cat problem.txt; fi; echo
     [ -f pack.txt ] && { echo "【參考零件】（只是參考，和題目不同時以題目為準）"; cat pack.txt; echo; }
     [ -s "$VER" ] && { echo "【驗收腳本】（用 grab／send／show／call 指令）"; cat "$VER"; echo; }
     [ "$N" -lt 2 ] && { echo "【目前程式】"; echo '```python'; cat main.py; echo '```'; }
@@ -203,8 +220,8 @@ echo "【題目】"; cat problem.txt
 print_write() {
 if [ "$(cat .mode 2>/dev/null)" = proj ]; then
 cat <<'FB_PCODEP'
-你是上機考解題助手。這是一個多檔案 C 專案（用 make 編譯）。根據下面的【題目】與【專案檔案】，只修改題目要求的那一個檔案。
-規則：1. 輸出「那一個檔案修改後的完整內容」，放在一個 ```c 程式碼區塊，區塊第一行寫 // FILE: 檔名（例：// FILE: ringbuf.c）。2. 不要改沒被要求的檔案；不要自己另寫 main（除非要改的就是 main.c）；#include、函式名稱與參數照原本的。3. 輸出格式逐字照題目範例。4. 程式裡不要寫註解，前面最多 2 行說明。
+你是上機考解題助手。這是考場資料夾裡已有起始檔的題目（有 Makefile 就用 make 編譯）。根據下面的【題目】與【專案檔案】，只修改題目要求的那一個檔案（通常是有 TODO 或要修 bug 的那個）。
+規則：1. 輸出「那一個檔案修改後的完整內容」，放在一個 ```c 程式碼區塊，區塊第一行寫 // FILE: 檔名（例：// FILE: ringbuf.c；子資料夾要寫路徑，例：// FILE: rle/rle.c；要改的是 Python 檔就用 ```python 和 # FILE: 檔名）。2. 不要改沒被要求的檔案；不要自己另寫 main（除非要改的檔案本來就有 main）；#include、函式名稱與參數照原本的。3. 輸出格式逐字照題目範例。4. 程式裡不要寫註解，前面最多 2 行說明。
 FB_PCODEP
 echo "【題目】"; cat problem.txt
 [ -f pack.txt ] && { echo "【參考零件】"; head -n 12 pack.txt; }
@@ -230,23 +247,28 @@ echo "【題目】"; cat problem.txt
 tidy_s() { sed 's/[[:space:]]*$//' | awk '{a[NR]=$0} END{e=NR; while (e>0 && a[e]=="") e--; for (i=1;i<=e;i++) print a[i]}'; }
 stress_run() {   # 回傳 0=沒找到反例  1=找到反例（寫進 tests/s<k>）  2=暴力解不可信  3=最大規模逾時
   local X="python3 main.py" i=0 k S f RC
-  if [ -f main.c ]; then gcc -O2 -pthread -o .fb_main main.c -lm 2>/dev/null || return 0; X=./.fb_main; fi
+  if [ "$(cat .mode 2>/dev/null)" = proj ]; then   # 專案模式：用剛才 make／gcc 編好的執行檔
+    case "$(cat .fb_target 2>/dev/null)" in *.py) X="python3 $(cat .fb_target)" ;; *) X=$(cat .fb_prog 2>/dev/null); [ -n "$X" ] && [ -x "$X" ] || return 0 ;; esac
+  elif [ -f main.c ]; then gcc -O2 -pthread -o .fb_main main.c -lm 2>/dev/null || return 0; X=./.fb_main; fi
   for f in tests/*.in; do [ -f "${f%.in}.out" ] || continue
     timeout 5 python3 brute.py < "$f" 2>/dev/null | tidy_s > .fb_b; tidy_s < "${f%.in}.out" > .fb_e
-    cmp -s .fb_b .fb_e || { echo "⚠️ 暴力解連範例 $(basename "$f") 都不對，不採用對拍（照樣算通過）" >&2; return 2; }
+    cmp -s .fb_b .fb_e || { echo "⚠️ 暴力解連範例 $(basename "$f") 都不對，不採用對拍" >&2; echo "$f" > .fb_bf; return 2; }
   done
-  S=$(date +%s)
+  S=$(date +%s); local cmpd=0; rm -f .fb_genbad
   for i in $(seq 1 300); do
     [ $(( $(date +%s) - S )) -ge "${STRESS_SEC:-20}" ] && break
     timeout 5 python3 gen.py > .fb_r.in 2>/dev/null || continue; [ -s .fb_r.in ] || continue
     timeout 5 python3 brute.py < .fb_r.in > .fb_r.exp 2>/dev/null || continue
-    timeout "${TO:-5}" $X < .fb_r.in > .fb_r.got 2>/dev/null; RC=$?
+    [ -n "$(tr -d '[:space:]' < .fb_r.exp)" ] || continue   # 暴力解什麼都沒印：多半是暴力解自己沒處理這種輸入，不拿來當反例
+    timeout "${TO:-5}" $X < .fb_r.in > .fb_r.got 2>/dev/null; RC=$?; cmpd=$((cmpd+1))
     if [ $RC -ne 0 ] || ! cmp -s <(tidy_s < .fb_r.got) <(tidy_s < .fb_r.exp); then
       k=$(( $(ls tests/s*.in 2>/dev/null | wc -l) + 1 )); cp .fb_r.in "tests/s$k.in"; cp .fb_r.exp "tests/s$k.out"
       echo "🔎 對拍第 $i 組隨機測資找到反例，已存成 tests/s$k.in／.out" >&2; return 1
     fi
   done
-  echo "✅ 對拍 $i 組隨機小測資都和暴力解一致" >&2
+  if [ "$cmpd" -eq 0 ]; then   # 產生器的輸入暴力解全都印不出東西：產生器格式多半不對，這次對拍不算數
+    cp .fb_r.in .fb_genbad 2>/dev/null; echo "⚠️ 產生器產生的輸入，暴力解一組都印不出結果（產生器的輸入格式可能不對），不採用對拍" >&2; return 2; fi
+  echo "✅ 對拍 $cmpd 組隨機小測資都和暴力解一致" >&2
   if timeout 20 python3 gen.py big > .fb_big.in 2>/dev/null && [ "$(wc -c < .fb_big.in)" -gt 20000 ]; then
     timeout "${TO:-5}" $X < .fb_big.in > /dev/null 2>&1; RC=$?
     [ $RC -eq 124 ] && { echo "⏱️ 最大規模輸入（$(wc -c < .fb_big.in) bytes）超過 ${TO:-5} 秒" >&2; return 3; }
@@ -258,10 +280,24 @@ stress_after() {   # $1=stress_run 的結果；$2=程式檔
   case "$1" in
     1) echo fix > .stage; echo "❌ 對拍找到範例沒抓到的錯誤。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
        echo "（注意：名稱是 s 開頭的測資是隨機產生的，預期輸出來自另一個確定正確的暴力解，請相信它，照它修正。）"
-       bash "$SELF" check "$2" ;;
+       if [ "$(cat .mode 2>/dev/null)" = proj ]; then PROJ=1 bash "$SELF" check "$2"; else bash "$SELF" check "$2"; fi ;;
     3) echo fix > .stage; echo "❌ 範例都對，但最大規模輸入逾時。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
        echo "【修正任務】你是上機考解題助手。下面的程式答案正確，但題目允許的最大規模輸入執行超過 ${TO:-5} 秒被中止（太慢）。請先用一句話說目前的時間複雜度，再改用更快的演算法（N 到 10^5 以上要 O(N log N) 以下；輸入輸出用 scanf／printf，大量輸出不要每行 fflush），輸入輸出格式不變，給完整程式（只給一個程式碼區塊，不要註解）。"
-       echo "【題目】"; cat problem.txt; echo; echo "【目前程式】"; echo '```'; cat "$2"; echo '```' ;;
+       echo "【題目】"; prob_wo "$2"; echo; echo "【目前程式】"; echo '```'; cat "$2"; echo '```' ;;
+    2) if [ ! -f .fb_brute_retry ]; then   # 暴力解不可信：再請 AI 重寫一次暴力解（只重試一次）
+         touch .fb_brute_retry; rm -f brute.py gen.py; echo brute > .stage; F0=$(cat .fb_bf 2>/dev/null)
+         echo "⚠️ 暴力解或產生器不可信，不能拿來對拍。把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "--------" >&2
+         if [ -f .fb_genbad ]; then
+           echo "（上一次的產生器產生的輸入格式不對，暴力解跑出來全是空的。產生器印出的例子（前 4 行）："; head -n 4 .fb_genbad | cut -c1-120
+           echo "題目範例輸入（前 4 行）："; head -n 4 tests/1.in 2>/dev/null | cut -c1-120
+         else
+           echo "（上一次你寫的暴力解連題目範例都算錯。範例輸入（前 6 行）："; head -n 6 "$F0" | cut -c1-120
+           echo "應該印出（前 6 行）："; head -n 6 "${F0%.in}.out" | cut -c1-120
+           echo "你的暴力解印出（前 6 行）："; head -n 6 .fb_b | cut -c1-120
+         fi
+         echo "這次暴力解要逐字照題目的輸入輸出格式（例如數字是 0x 開頭的 16 進位就用 int(s, 0) 讀、照題目格式印）。產生器印出的輸入也要和題目範例的格式一樣。）"; print_brute
+       else touch .fb_stress_ok; echo done > .stage
+         echo "🎉 範例全部通過（暴力解兩次都不可信，所以沒有對拍；有空就自己想想邊界情況）。交卷：直接打 fb submit（第一次會問作答專案的網址和檔名）。下一題：fb reset" >&2; fi ;;
     *) touch .fb_stress_ok; echo done > .stage
        echo "🎉 全部通過（含對拍）！交卷：直接打 fb submit（第一次會問作答專案的網址和檔名）。下一題：fb reset" >&2 ;;
   esac
@@ -343,19 +379,54 @@ extract_samples() {   # 不靠 AI：直接從 problem.txt 抓「範例輸入／�
   awk -v D="$1" '
     function rest(s,  p) { p = index(s, "："); if (p) return substr(s, p + length("：")); p = index(s, ":"); return p ? substr(s, p + 1) : "" }
     { line=$0; sub(/\r$/, "", line) }
-    line ~ /^[ \t]*```/ { infence=!infence; next }
-    !infence && line ~ /(範例|樣例|[Ss]ample)[ \t]*(輸入|[Ii]nput)|輸入範例/ { md="in"; ki++; f=D "/" ki ".in"; printf "" > f
+    line ~ /^[ \t]*```/ { if (!infence && pend) { md="out"; ko++; f=D "/" ko ".out"; printf "" > f; got=0; pm=1 }; pend=0
+        infence=!infence; if (!infence && md == "in") fdone=1; if (!infence && pm) { md=""; pm=0 }; next }
+    !infence && md == "" && line ~ /(輸出|[Oo]utput).*(：|:)[ \t]*$/ && line !~ /格式/ && length(line) <= 150 { pend=1; next }   # 「輸出大概像這樣：」後面緊接 ``` 區塊＝範例輸出（官方 README 的寫法）
+    pend && line ~ /[^ \t]/ { pend=0 }
+    !infence && line ~ /(範例|樣例|[Ss]ample)[ \t]*(輸入|[Ii]nput)|輸入範例/ { md="in"; fdone=0; ki++; f=D "/" ki ".in"; printf "" > f
         r=rest(line); sub(/^[ \t]+/, "", r); if (r != "") print r >> f; next }
-    !infence && line ~ /(範例|樣例|[Ss]ample)[ \t]*(輸出|[Oo]utput)|輸出範例/ { md="out"; ko++; f=D "/" ko ".out"; printf "" > f
+    !infence && line !~ /輸出|[Oo]utput/ && (line ~ /(範例|樣例|[Ss]ample|[Ee]xample)[ \t]*[0-9]*.*(輸入|[Ii]nput|內容)/ && length(line) <= 80 || line ~ /(範例|樣例)[ \t]*[0-9]*[ \t]*(：|:)[ \t]*[A-Za-z0-9_.-]+[.](txt|in|dat)[ \t]*$/) {
+        md="in"; fdone=0; ki++; f=D "/" ki ".in"; printf "" > f; next }   # 檔案輸入題：「範例 1：input.txt 內容」「範例：data.txt」
+    !infence && line ~ /(範例|樣例|[Ss]ample)[ \t]*[0-9]*[ \t]*(輸出|[Oo]utput)|輸出範例/ { md="out"; ko++; f=D "/" ko ".out"; printf "" > f
         r=rest(line); sub(/^[ \t]+/, "", r); got=0; if (r != "") { print r >> f; got=1 }; next }
+    !infence && md == "in" && fdone && line ~ /輸出|[Oo]utput|執行後|結果|[Rr]esult/ && line !~ /輸出格式/ && length(line) <= 90 {
+        md="out"; ko++; f=D "/" ko ".out"; printf "" > f; got=0; next }   # 輸入的 ``` 區塊後面的「執行 ./x input.txt 的輸出」「輸出」「執行後 result.txt」
     !infence && line ~ /^[ \t]*(說明|解釋|提示|限制|注意|備註|輸入格式|輸出格式|Explanation|Note|【)/ { md=""; next }
     md == "out" && !infence && line ~ /^[ \t]*$/ && got { md=""; next }   # 輸出後面的空白行＝範例結束
+    !infence && line ~ /輸入|[Ii]nput|stdin|讀入|argv|scanf|命令列/ { hasin=1 }
     md != "" { print line >> f; if (line ~ /[^ \t]/) got=1 }
-    END { k = ki < ko ? ki : ko; print k > (D "/count") }' problem.txt
+    END { k = ki < ko ? ki : ko
+          if (ki == 0 && ko > 0 && !hasin) { for (j = 1; j <= ko; j++) printf "" > (D "/" j ".in"); k = ko }   # 程式不讀輸入（例如 make run 直接印結果）：只有範例輸出 → 輸入當空的
+          print k > (D "/count") }' problem.txt
   for f in "$1"/*.in "$1"/*.out; do [ -f "$f" ] && { trim_blank < "$f" > "$f.t"; mv "$f.t" "$f"; }; done
   cat "$1/count"
 }
 norm() { tr -d ' \t\r\n' ; }
+has_starter_c() {   # 考場資料夾裡有「題目提到（寫出路徑或檔名）」或「有 TODO」的 .c 起始檔
+  local f; for f in $(find . -maxdepth 2 -type f -name '*.c' ! -path './.fb*' ! -path './tests/*' | sed 's#^\./##'); do
+    { grep -qF "$f" problem.txt || grep -q 'TODO' "$f"; } && return 0; done; return 1
+}
+attach_files() {   # 題目提到的起始檔附在 problem.txt 後面：有 TODO 的（要改的）整份，其他只留程式行；有 .h 的 .c 實作只附 .h；總共約 150 行內（context 只有 4096）
+  local P0 ALL f b d body n tot=0 lg L
+  P0=$(cat problem.txt)
+  ALL=$(find . -maxdepth 2 -type f \( -name '*.[ch]' -o -name '*.py' -o -name '*.pio' -o -name 'Makefile' -o -name 'makefile' \) ! -path './.fb*' ! -path './tests/*' ! -name 'brute.py' ! -name 'gen.py' | sed 's#^\./##' | sort)
+  [ -n "$ALL" ] || return 0
+  { echo; echo "【專案裡的檔案】$(echo $ALL)"; } >> problem.txt
+  for f in $( { grep -l 'TODO' $ALL 2>/dev/null; printf '%s\n' $ALL | grep '\.h$'; printf '%s\n' $ALL; } | awk '!s[$0]++'); do
+    b=$(basename "$f"); d=$(dirname "$f"); [[ "$b" == [Mm]akefile ]] && continue
+    if ! grep -q 'TODO' "$f"; then
+      { [[ "$P0" == *"$f"* ]] || { [ "$d" = . ] && [[ "$P0" == *"$b"* ]]; }; } || continue   # 子資料夾的檔案要寫出路徑才算有提到
+      [[ "$f" == *.c ]] && [ -f "${f%.c}.h" ] && printf '%s\n' $ALL | grep -qx "${f%.c}.h" && continue   # 有 .h 就只看介面
+    fi
+    L=$(grep -m1 -vE '^[[:space:]]*(//.*|/\*.*|\*.*|#.*|;.*)?$' "$f" | sed 's/^[[:space:]]*//')
+    [ -n "$L" ] && [[ "$P0" == *"$L"* ]] && continue   # 題目裡已經貼了這個檔案
+    case "$f" in *.py) lg=python; body=$(grep -vE '^[[:space:]]*(#.*)?$' "$f") ;; *.pio) lg=text; body=$(cat "$f") ;; *) lg=c; body=$(grep -vE '^[[:space:]]*(//.*|/\*.*|\*.*)?$' "$f") ;; esac
+    grep -q 'TODO' "$f" && body=$(cat "$f")
+    n=$(printf '%s\n' "$body" | wc -l)
+    if [ $((tot + n)) -gt 150 ]; then echo "【專案檔案 $f】（$n 行，太長沒附上）" >> problem.txt; continue; fi
+    tot=$((tot + n)); { echo "【專案檔案 $f】"; echo '```'"$lg"; printf '%s\n' "$body"; echo '```'; } >> problem.txt
+  done
+}
 
 case "$1" in
   selfcheck)
@@ -452,8 +523,143 @@ case "$1" in
          echo "【目前程式】"; echo "${FENCE}$LT"; cat "$SRC"; echo "$FENCE"
          echo "【CI 的 log（重點，最後 40 行）】"; echo "${FENCE}text"; printf '%s\n' "$LOG"; echo "$FENCE"
          exit 0 ;;
+  task)  # 任務模式：不是「寫一支程式」的題目（要下指令觀察、改設定／Makefile、解 git 衝突、在專案裡找要改哪裡）→ AI 給檔案與指令，fb 確認後照做並回報
+         if [ "$2" = done ]; then echo done > .task_stage; echo "✅ 已標記這個任務完成。要交卷就打 fb submit。"; exit 0; fi
+         if [ "$2" = reset ]; then rm -rf .task_stage .task.txt .task_log .task_last .task_orig; echo "任務模式已清空。重新開始：fb task"; exit 0; fi
+         TS=$(cat .task_stage 2>/dev/null || echo start)
+         [ "$TS" = done ] && { echo "✅ 這個任務 AI 已經說完成了。要重來：fb task reset"; exit 0; }
+         task_prompt() {
+           echo "你是上機考助手，要幫我在 Linux 終端機（bash；可能有 ROS 2 Jazzy、gcc、make、python3，沒有 sudo）完成下面的【任務】。你不能直接操作電腦：每一輪你給我「要寫入的檔案」和「要執行的指令」，我照做後把結果貼給你。"
+           echo "規則：1. 建立或修改檔案：程式碼區塊的前一行寫「FILE: 檔名」（用目前資料夾底下的相對路徑），區塊裡放該檔案修改後的『完整內容』；Makefile 的指令行用 Tab 開頭。2. 要執行的指令放在一個 ${FENCE}bash 區塊。不要把輸出導到檔案（不要用 > xxx.txt），直接印出來我才看得到。不要寫 <名稱> 這種佔位字，要用【上一步的結果】裡的實際名稱。3. 題目給的檔案，除非題目要你改，否則不要改寫它，用指令執行或查看就好。不要用 vim、nano、sudo。4. 先 cat 看懂題目給的檔案，一次只做一小步，只做和【任務】有關的事。5. 任務全部完成也驗證過，就只回覆【完成】加一句說明，不要再給指令。"
+           ISROS=0; grep -qiE 'ros|topic|節點|service' .task.txt && ISROS=1
+           [ $ISROS -eq 1 ] && echo "ROS 提示：要觀察題目給的節點，用 timeout 60 python3 檔名.py & 接著 sleep 3 再用 ros2 指令看；ros2 topic echo 要加 timeout 5。下面【目前在跑的 ROS…】是 fb 自動查到的實際名稱，答案要以它為準。"
+           echo "【任務】"; head -c 1200 .task.txt; [ "$(wc -c < .task.txt)" -gt 1200 ] && echo "…（任務太長已截斷；完整內容可用 cat .task.txt 查看）"; echo
+           echo "【目前資料夾】$(pwd)；檔案：$(ls -p | grep -v '^\.' | head -25 | tr '\n' ' ')"
+           if [ -f /opt/ros/jazzy/setup.bash ] && [ $ISROS -eq 1 ]; then   # 自動附上目前的 ROS 圖，AI 不用自己找
+             RG=$( (source /opt/ros/jazzy/setup.bash >/dev/null 2>&1; N=$(timeout 8 ros2 node list 2>/dev/null); [ -n "$N" ] && { echo "節點：$(echo "$N" | tr '\n' ' ')"; timeout 8 ros2 topic list -t 2>/dev/null | grep -vE '^/(rosout|parameter_events) ' | sed 's/^/topic /'; timeout 8 ros2 service list -t 2>/dev/null | grep -vE '_parameters|parameter_types|type_description' | sed 's/^/service /'; }) | head -20 | cut -c1-150)
+             [ -n "$RG" ] && { echo "【目前在跑的 ROS 節點、topic（含型別）、service】"; echo "$RG"; }
+           fi
+           echo "【到目前為止做過的事】"; if [ -s .task_log ]; then tail -c 600 .task_log; else echo "（還沒開始）"; fi
+           [ -s .task_last ] && { echo "【上一步的結果】"; head -c 900 .task_last; echo; }
+           if [ -s .task_last ]; then echo "先判斷：只有在【上一步的結果】清楚顯示【任務】的每一項要求都已經達成（該改的檔案改了、驗證的輸出正確、該寫的檔案寫了），才只回覆【完成】加一句說明；否則給下一步。"
+           else echo "請給第一步。"; fi
+         }
+         done_ok() {   # AI 說【完成】時檢查：結果還有錯誤訊息、或題目要的輸出檔還沒寫 → 不算完成（印出原因）
+           local r="" f
+           grep -qiE 'error|錯誤|traceback|missing separator|no such file|not found|failed|（結束碼 [1-9]' .task_last 2>/dev/null && r="（你說完成了，但上一步的結果裡還有錯誤訊息或結束碼不是 0，還不算完成。）"
+           for f in $(grep -oE '[A-Za-z0-9_./-]+\.(txt|md|csv|json|yaml|yml|log|out)' .task.txt | sort -u); do
+             grep -qiE "(寫進|寫入|寫到|存到|存成|存進|輸出到|產生|建立|記錄|write|save|output|record).{0,40}$f|$f.{0,12}(裡|中|檔)" .task.txt || continue
+             [ -s "$f" ] || r="$r（你說完成了，但題目要的 $f 還沒寫出來或是空的：請用「FILE: $f」加程式碼區塊寫入完整內容。）"
+           done
+           if grep -qiE '修改|修正|修好|修復|補完|補上|實作|改寫|改成|改好|改為|新增|加上|TODO|fix|implement|modify|edit|complete|update|解決|resolve' .task.txt && ! grep -q '寫入' .task_log 2>/dev/null; then
+             r="$r（你說完成了，但題目要你修改檔案，你還沒有用「FILE: 檔名」寫入任何檔案。）"
+           elif grep -q '寫入' .task_log 2>/dev/null && [ "$(grep -nE '寫入|→ 結束碼' .task_log | tail -1 | grep -c '寫入')" = 1 ]; then
+             r="$r（你說完成了，但改完檔案之後還沒有執行指令驗證（例如 make、執行程式），請先驗證。）"
+           fi
+           printf '%s' "$r"
+         }
+         if [ "$TS" = start ]; then H="題目／任務（整段）"; else H="AI 的整段回覆"; fi
+         echo "👉 請貼上【$H】，貼完按 Enter，再按 Ctrl-D" >&2
+         if [ -t 0 ] && trap "stty icanon 2>/dev/null" EXIT INT && stty -icanon 2>/dev/null; then
+           IFS= read -r -d "$(printf '\004')" IN; stty icanon 2>/dev/null; echo >&2
+         else IN=$(cat); fi
+         [ -n "$IN" ] || { echo "沒有貼到任何東西" >&2; exit 1; }
+         if [ "$TS" = start ]; then
+           printf '%s\n' "$IN" > .task.txt; : > .task_log; rm -f .task_last; echo run > .task_stage
+           find . -maxdepth 3 -type f ! -path './.*' ! -path '*/.git/*' 2>/dev/null | sed 's#^\./##' > .task_orig   # 題目原本就有的檔案（之後 AI 要改寫，題目得有叫它改）
+           GD=$(git rev-parse --git-dir 2>/dev/null) && for x in '.task*' '.fb_*' '.fb_task_bak/' '.stage' '.sid' '.mode' '.pack_manual' 'pack.txt' 'problem.txt' 'node.log' 'verify.out'; do   # fb 的暫存檔不要被 git add -A 交出去（只寫在本機 .git/info/exclude）
+             grep -qxF "$x" "$GD/info/exclude" 2>/dev/null || echo "$x" >> "$GD/info/exclude"; done
+           echo "✅ 已存任務（任務模式）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+           task_prompt; exit 0
+         fi
+         T=$(mktemp -d); printf '%s\n' "$IN" > "$T/in.txt"; split_blocks "$T"; NB=$(cat "$T/count")
+         FILES=""; : > "$T/cmd.sh"; SKIP=""; WARN=""
+         PEND=""
+         for i in $(seq 1 "$NB"); do
+           lg=$(tr 'A-Z' 'a-z' < "$T/b$i.lang" | tr -d ' \r'); B="$T/b$i.body"; P=""
+           if [ "$(grep -c . "$B")" -le 1 ] && grep -qE '^[[:space:]]*(FILE|檔案|檔名)[[:space:]]*(:|：)' "$B"; then   # 「```text」裡只有一行 FILE: x → 是下一個區塊的檔名
+             PEND=$(sed -nE 's/^[[:space:]]*(FILE|檔案|檔名)[[:space:]]*(:|：)[[:space:]]*`?([^` ]+)`?.*/\3/p' "$B" | head -1); continue; fi
+           [ -n "$PEND" ] && { P="$PEND"; PEND=""; }
+           # 區塊前一行的「FILE: 路徑」只算給緊接著的那一個區塊（下一個區塊沿用同一行＝不是它的檔名）
+           if [ -n "$P" ] || { [ "$i" -gt 1 ] && cmp -s "$T/b$i.prev" "$T/b$((i-1)).prev"; }; then :
+           else P=$(sed -nE 's/.*(FILE|File|file|檔案|檔名)[[:space:]]*(:|：)[[:space:]]*`?([^` ]+)`?.*/\3/p' "$T/b$i.prev" | head -1); fi
+           [ -z "$P" ] && P=$(head -1 "$B" | sed -nE 's#^[[:space:]]*(//|\#|--|;)[[:space:]]*(FILE|檔案)[[:space:]]*(:|：)[[:space:]]*([^ ]+).*#\4#p')
+           [ -z "$P" ] && P=$(sed -nE 's/^[A-Za-z0-9+#-]*[[:space:]]+(title=)?"?([A-Za-z0-9_./-]+\.[A-Za-z0-9]+|Makefile)"?.*/\2/p' "$T/b$i.info" | head -1)
+           P=$(printf '%s' "$P" | sed -E "s/^[*\"'\`]+//; s/[*\"'\`，。：:）)]+\$//")   # FILE: **Makefile**、「`main.c`。」之類的符號去掉
+           if [ -n "$P" ]; then
+             case "$P" in "$PWD"/*) P="${P#"$PWD"/}" ;; esac   # AI 常寫成絕對路徑：在目前資料夾底下就換成相對路徑
+             case "$P" in /etc/*|/usr/*|/bin/*|/sbin/*|/boot/*|/proc/*|/sys/*|/dev/*|/lib*) WARN="$WARN（沒有寫入 $P：系統資料夾不能改，請用目前資料夾底下的相對路徑）"$'\n'; continue ;; esac
+             case "$P" in .task*|.fb*|task.txt) WARN="$WARN（沒有寫入 $P：那是 fb 自己的檔案）"$'\n'; continue ;; esac
+             if grep -qxF -- "$P" .task_orig 2>/dev/null; then   # 題目原本就有的檔案：題目要「改」它才准寫
+               if ! grep -qiE '修改|修正|修好|修復|補完|補上|實作|改寫|改成|改好|改為|新增|加上|TODO|fix|implement|modify|edit|complete|update' .task.txt; then
+                 WARN="$WARN（沒有寫入 $P：這是題目給的檔案，題目沒有要你改它；請用指令執行或 cat 查看它）"$'\n'; continue; fi
+               if ! grep -qF -- "$(basename "$P")" .task.txt && grep -qiE '[A-Za-z0-9_]\.(c|h|py|cpp|sh|yaml|yml|json|xml)([^A-Za-z]|$)|Makefile' .task.txt; then
+                 WARN="$WARN（沒有寫入 $P：題目要改的不是這個檔案；只改題目提到的檔案）"$'\n'; continue; fi
+             fi
+             grep -qE '^[[:space:]]*(//|#|--|;)[[:space:]]*(FILE|檔案)[[:space:]]*(:|：)' <(head -1 "$B") && sed -i '1d' "$B"
+             FILES="$FILES$P"$'\n'; cp "$B" "$T/f$i"; echo "$P" > "$T/f$i.path"
+           elif [[ "$lg" =~ ^(bash|sh|shell|console|zsh|terminal)$ ]] || { [ -z "$lg" ] && grep -qE '^[[:space:]]*(\$ )?(ls|cat|cd|make|gcc|python3?|ros2|git|grep|echo|mkdir|cp|mv|sed|timeout|source|chmod|\./)' "$B"; }; then
+             sed -E 's/^[[:space:]]*\$ //' "$B" >> "$T/cmd.sh"; echo >> "$T/cmd.sh"
+           else SKIP="$SKIP ${lg:-無標籤}"; fi
+         done
+         DONE=0; grep -q '【完成】' "$T/in.txt" && DONE=1
+         if [ -z "$FILES" ] && [ ! -s "$T/cmd.sh" ]; then
+           if [ -n "$WARN" ]; then printf '%s' "$WARN" > .task_last; echo "⚠️ $WARN把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
+           if [ $DONE -eq 1 ] && R=$(done_ok) && [ -n "$R" ]; then
+             { echo "$R"; cat .task_last 2>/dev/null; } > "$T/l" && mv "$T/l" .task_last
+             echo "⚠️ AI 說完成了，但 fb 檢查還沒完成：$R" >&2; echo "把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2; task_prompt; rm -rf "$T"; exit 0; fi
+           if [ $DONE -eq 1 ]; then echo done > .task_stage; echo "✅ AI 說任務完成了：$(grep -m1 '【完成】' "$T/in.txt" | cut -c1-150)" >&2
+             echo "👉 自己確認一下結果（例如 fb test、make、看檔案）；要交卷就打 fb submit，或照考場規定 git add／commit／push。" >&2; rm -rf "$T"; exit 0; fi
+           echo "⚠️ AI 的回覆裡沒有「FILE: 路徑」的檔案，也沒有 bash 指令。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+           echo "（上一次你沒有照格式回答${SKIP:+：你給的程式碼區塊沒有寫「FILE: 路徑」，我不知道要存到哪個檔案}。請照規則給下一步。）"; task_prompt; rm -rf "$T"; exit 0
+         fi
+         echo "======== AI 要做的事 ========" >&2
+         [ -n "$FILES" ] && { echo "📝 寫入檔案：$(printf '%s' "$FILES" | tr '\n' ' ')" >&2; }
+         [ -s "$T/cmd.sh" ] && { echo "▶️ 執行指令："; sed 's/^/   /' "$T/cmd.sh" | head -20; } >&2
+         [ -n "$SKIP" ] && echo "（略過沒寫 FILE: 路徑的程式碼區塊：$SKIP）" >&2
+         if [ -z "$FB_YES" ] && [ -r /dev/tty ]; then
+           read -r -p "要照做嗎？直接按 Enter＝照做；打 n 再按 Enter＝不要：" ok </dev/tty 2>/dev/null
+           [ "$ok" = n ] || [ "$ok" = N ] && { echo "已取消，什麼都沒做。要重新問 AI：把上一輪的內容再貼一次給 AI（或 fb task reset 重來）。"; rm -rf "$T"; exit 0; }
+         fi
+         N=$(( $(grep -c '^第 [0-9]* 步' .task_log 2>/dev/null) + 1 ))
+         { echo "第 $N 步："; } >> .task_log
+         if [ -n "$FILES" ]; then BK=".fb_task_bak/$(date +%H%M%S)"
+           for f in "$T"/f*.path; do [ -f "$f" ] || continue; P=$(cat "$f")
+             [ -e "$P" ] && { mkdir -p "$BK/$(dirname "$P")"; cp "$P" "$BK/$P"; }
+             mkdir -p "$(dirname "$P")"; cp "${f%.path}" "$P"; [[ "$P" == *.sh ]] && chmod +x "$P"
+             case "$(basename "$P")" in [Mm]akefile|GNUmakefile|*.mk) sed -i -E 's/^ +/\t/' "$P" ;; esac   # 網頁複製常把 Tab 變空白：Makefile 開頭的空白一律換回 Tab
+           done
+           echo "  寫入 $(printf '%s' "$FILES" | tr '\n' ' ')" >> .task_log; echo "📝 已寫入（舊檔備份在 ${BK}/）" >&2
+         fi
+         if [ -n "$FILES" ]; then   # 寫了檔：fb 先自動建置／檢查（make、cmake、語法檢查、印出答案檔），小模型常忘了建置或驗證
+           { echo "# fb 自動建置／檢查"
+             printf '%s' "$FILES" | grep -qiE '(^|/)(GNUmakefile|[Mm]akefile)$|\.(c|h|mk|pio|s|S|cpp)$' && { [ -f Makefile ] || [ -f makefile ]; } && echo 'make 2>&1 | tail -n 15'
+             printf '%s' "$FILES" | grep -qiE '(^|/)CMakeLists\.txt$|\.(c|h|pio|s|S|cpp|cmake)$' && [ -f CMakeLists.txt ] && ! { [ -f Makefile ] || [ -f makefile ]; } && echo 'cmake -S . -B build > build_cmake.log 2>&1 || tail -n 15 build_cmake.log; cmake --build build 2>&1 | grep -iE "error|warning|undefined|\[100%\]|Built target" | head -n 20'
+             printf '%s' "$FILES" | grep -E '\.c$' | while read -r f; do { [ -f Makefile ] || [ -f makefile ] || [ -f CMakeLists.txt ]; } || echo "gcc -fsyntax-only -Wall '$f' 2>&1 | head -n 10"; done
+             printf '%s' "$FILES" | grep -E '\.py$' | while read -r f; do echo "python3 -m py_compile '$f' && echo '$f 語法正確'"; done
+             printf '%s' "$FILES" | grep -iE '\.(txt|md|csv|json|ya?ml|out|log)$' | while read -r f; do echo "echo '== $f：'; head -n 20 '$f'"; done
+           } > "$T/auto.sh"
+           if [ "$(wc -l < "$T/auto.sh")" -gt 1 ] && ! grep -qE '(^|[;&|[:space:]])(make|cmake|gcc|cc)([[:space:]]|$)' "$T/cmd.sh"; then
+             { cat "$T/auto.sh"; echo "# AI 給的指令"; cat "$T/cmd.sh"; } > "$T/c2" && mv "$T/c2" "$T/cmd.sh"   # AI 自己有 make／gcc 就不重複建置
+           fi
+         fi
+         if [ -s "$T/cmd.sh" ]; then
+           { echo '[ -f /opt/ros/jazzy/setup.bash ] && source /opt/ros/jazzy/setup.bash >/dev/null 2>&1'; cat "$T/cmd.sh"; } > "$T/run.sh"
+           timeout "${TTO:-60}" bash "$T/run.sh" > "$T/out" 2>&1 < /dev/null; RC=$?
+           for rf in $(grep -oE '(^|[^2&])>>?[[:space:]]*[A-Za-z0-9_./-]+' "$T/cmd.sh" | sed -E 's/^.?>>?[[:space:]]*//' | grep -vE '^/dev/|^build_cmake\.log$' | sort -u | head -5); do   # 指令把輸出存進檔案 → 幫 AI 印出來
+             [ -f "$rf" ] && { echo "== $rf 的內容（指令把輸出存進檔案，fb 幫你印出來）："; head -n 15 "$rf" | cut -c1-160; } >> "$T/out"; done
+           { printf '%s' "$WARN"; tail -n 50 "$T/out" | cut -c1-200; [ $RC -eq 124 ] && echo "（指令超過 ${TTO:-60} 秒被中止）"; echo "（結束碼 $RC）"; } > .task_last
+           echo "--- 指令輸出（最後 25 行）---" >&2; tail -n 25 .task_last >&2
+           { sed 's/^/  $ /' "$T/cmd.sh" | grep -v '^  \$ $' | head -4 | cut -c1-120; echo "  → 結束碼 $RC；輸出：$(grep -v '^（結束碼' .task_last | head -2 | tr '\n' ' ' | cut -c1-140)"; } >> .task_log
+         else { printf '%s' "$WARN"; echo "（這一步只有寫檔，沒有指令）"; } > .task_last; fi
+         if [ $DONE -eq 1 ]; then R=$(done_ok)
+           if [ -n "$R" ]; then echo "$R" >> .task_last; echo "⚠️ AI 說完成了，但 fb 檢查還沒完成：$R" >&2
+           else echo done > .task_stage; echo "✅ AI 說任務完成了。自己確認一下結果；要交卷就打 fb submit。" >&2; rm -rf "$T"; exit 0; fi
+         fi
+         echo "✅ 照做完了。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+         task_prompt; rm -rf "$T"; exit 0 ;;
   reset) B=".fb_old/$(date +%m%d_%H%M%S)"; mkdir -p "$B"   # 不直接刪：搬到 .fb_old/，考場原本的檔案從 .fb_bak/ 還原
-         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_stamp .fb_stress_ok .fb_main brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log verify.out; do
+         for f in .stage .sid .mode .pack_manual .fb_io .fb_target .fb_prog .fb_pass .fb_app .fb_brute_retry .fb_bf .fb_genbad .fb_stamp .fb_stress_ok .fb_main brute.py gen.py problem.txt pack.txt main.c main.cpp main.py .fb_sig .fb_n tests verify.sh expected.txt node.log node1.log verify.out; do
            [ -e "$f" ] && mv "$f" "$B/"; done
          if [ -d .fb_bak ]; then cp -r .fb_bak/. . && echo "（已還原考場原本的檔案：$(ls -A .fb_bak | tr '\n' ' ')）"; rm -rf .fb_bak; fi
          echo "已清空（舊檔在 $B）。開始新的一題：fb 然後貼上題目"; exit 0 ;;
@@ -504,27 +710,25 @@ case "$STAGE" in
     # 題型判斷：只看 ROS 專屬字；「節點／topic」單獨出現不算（鏈結串列、樹、圖、MQTT 題都會有）
     if grep -qiE 'rclpy|rclcpp|ros ?2|ros2 |std_msgs|geometry_msgs|sensor_msgs|std_srvs|example_interfaces|/opt/ros|colcon|jazzy|humble' problem.txt \
        || { grep -qiE '訂閱|subscri' problem.txt && grep -qiE '發佈|發布|publish' problem.txt && grep -qiE 'topic|主題|節點|node' problem.txt; }; then echo ros > .mode
-    elif [ -f Makefile ] || [ -f makefile ]; then echo proj > .mode
+    elif [ -f Makefile ] || [ -f makefile ] || has_starter_c; then echo proj > .mode   # 有 Makefile，或題目提到／有 TODO 的 .c 起始檔（沒有 Makefile 時用 gcc 編）；無關的 .c 不算
     else echo std > .mode; fi
-    if [ "$(cat .mode)" = proj ]; then   # 題目提到、但題目裡沒有內容的 .c/.h，附在題目後面（每檔最多 150 行，省 context）
-      echo; echo "【專案裡的檔案】$(find . -maxdepth 2 -type f \( -name '*.[ch]' -o -name 'Makefile' -o -name '*.py' \) ! -path './.fb*' | sed 's#^\./##' | tr '\n' ' ')" >> problem.txt
-      for f in $(find . -maxdepth 2 -type f -name '*.[ch]' ! -path './.fb*' | sed 's#^\./##'); do
-        b=$(basename "$f"); grep -qF "$b" problem.txt || [[ "$b" == *.h ]] || continue
-        L=$(grep -m1 -vE '^[[:space:]]*(//.*|/\*.*|\*.*|#.*)?$' "$f" | sed 's/^[[:space:]]*//')
-        [ -n "$L" ] && grep -qF -- "$L" problem.txt && continue
-        { echo "【專案檔案 $f】"; echo '```c'; head -n 150 "$f"; echo '```'; } >> problem.txt
-      done
+    attach_files   # 考場資料夾裡題目提到的起始檔（.c/.h/.py/.pio）附在題目後面，AI 才看得到 TODO／要修的程式
+    if [ "$(cat .mode)" = ros ]; then   # ROS 題有 TODO 的起始 .py（例如 processor.py）：AI 的程式也寫進這個檔（交卷檔名不變）
+      T0=$(grep -l 'TODO' $(find . -maxdepth 2 -name '*.py' ! -path './.fb*') 2>/dev/null | head -1); [ -n "$T0" ] && echo "${T0#./}" > .fb_target
     fi
     rm -f .fb_io   # 題目要求從命令列參數／檔案讀寫時，測資也照這個方式餵（判斷錯就 fb io std）
-    if grep -qiE 'argv|命令列參數|命令列引數|command[- ]line arg' problem.txt; then echo "IO_ARGV=1" >> .fb_io; fi
-    FI=$(grep -oE '從[^，。]{0,8}[A-Za-z0-9_.-]+[.](txt|in|dat)' problem.txt | grep -oE '[A-Za-z0-9_.-]+[.](txt|in|dat)$' | head -1)
+    PT=$(sed '/^【專案裡的檔案】/,$d' problem.txt)   # 只看題目本身（附上的起始程式裡常有 argv，不能拿來判斷）
+    if grep -qiE 'argv|命令列參數|命令列引數|command[- ]line arg' <<< "$PT"; then echo "IO_ARGV=1" >> .fb_io; fi
+    FI=$(grep -oE '從[^，。]{0,8}[A-Za-z0-9_.-]+[.](txt|in|dat)' <<< "$PT" | grep -oE '[A-Za-z0-9_.-]+[.](txt|in|dat)$' | head -1)
     [ -n "$FI" ] && ! grep -q IO_ARGV .fb_io 2>/dev/null && echo "IO_IN=$FI" >> .fb_io
-    FO=$(grep -oE '(寫到|寫入|輸出到|存到)[^，。]{0,8}[A-Za-z0-9_.-]+[.](txt|out|dat)' problem.txt | grep -oE '[A-Za-z0-9_.-]+[.](txt|out|dat)$' | head -1)
+    FO=$(grep -oE '(寫到|寫入|輸出到|存到)[^，。]{0,8}[A-Za-z0-9_.-]+[.](txt|out|dat)' <<< "$PT" | grep -oE '[A-Za-z0-9_.-]+[.](txt|out|dat)$' | head -1)
     [ -n "$FO" ] && echo "IO_OUT=$FO" >> .fb_io
     [ -f .fb_io ] && echo "ℹ️ 這題的輸入輸出不是 stdin/stdout：$(tr '\n' ' ' < .fb_io)（判斷錯就打 fb io std）" >&2
-    case "$(cat .mode)" in ros) MN='ROS 2' ;; proj) MN='多檔案專案（有 Makefile，用 make 編譯）' ;; *) MN='一般輸入輸出' ;; esac
+    case "$(cat .mode)" in ros) MN='ROS 2' ;; proj) MN="考場起始檔專案（$( [ -f Makefile ] || [ -f makefile ] && echo '用 make 編譯' || echo '沒有 Makefile，用 gcc 編譯')；AI 會直接改起始檔）" ;; *) MN='一般輸入輸出' ;; esac
     echo "✅ 已存題目（題型：$MN；判斷錯了就打 fb mode std／fb mode ros／fb mode proj）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
-    if [ "$(cat .mode)" = ros ]; then print_select_ros; else print_select; fi ;;
+    if [ "$(cat .mode)" = ros ]; then print_select_ros; else print_select; fi
+    TK=$(python3 -c 'import sys; t=open("problem.txt",encoding="utf-8",errors="replace").read(); c=sum(1 for ch in t if ord(ch)>0x2e7f); print(c+(len(t)-c)//3)' 2>/dev/null)
+    [ "${TK:-0}" -gt 2200 ] && echo "⚠️ 題目（含附檔）約 $TK token，考場 AI 一次只能看約 4096 token，之後加上程式和回報會被截掉。建議 fb reset，重貼時只留「要做什麼＋輸入輸出格式＋範例」，刪掉背景說明、安裝步驟、和這題無關的段落。" >&2 ;;
   select)
     if [ "$(cat .mode 2>/dev/null)" = ros ]; then
       rm -f verify.sh expected.txt
@@ -555,6 +759,7 @@ case "$STAGE" in
       x=$(norm < "tests/$j.in"); y=$(norm < "tests/$j.out")
       { [ -n "$x" ] && [[ "$P" != *"$x"* ]]; } && { echo "⚠️ 第 $j 組範例輸入在題目裡找不到，可能被 AI 抄錯，請自己對一下 tests/$j.in" >&2; BADC=1; }
       { [ -n "$y" ] && [[ "$P" != *"$y"* ]]; } && { echo "⚠️ 第 $j 組範例輸出在題目裡找不到，可能被 AI 抄錯，請自己對一下 tests/$j.out" >&2; BADC=1; }
+      [ -z "$y" ] && BADC=1   # AI 給了空的範例輸出（常見於「沒有輸入、直接執行」的題目）
     done
     for j in $(seq $((k+1)) 99); do rm -f "tests/$j.in" "tests/$j.out"; done
     if [ "$k" -eq 0 ] || [ "$BADC" -eq 1 ]; then   # 備案：fb 自己從題目抓範例
@@ -563,6 +768,10 @@ case "$STAGE" in
         for j in $(seq 1 "$ke"); do cp "$T/ex/$j.in" "tests/$j.in"; cp "$T/ex/$j.out" "tests/$j.out"; done
         echo "✅ 改用 fb 直接從題目抓到的 $ke 組範例（AI 抄的不完整或抄錯）" >&2; k=$ke; fi
     fi
+    for j in $(seq 1 "$k"); do [ -n "$(norm < "tests/$j.out")" ] && continue   # 還是空的預期輸出：這組不能用（不然永遠比不過）
+      rm -f tests/$j.in tests/$j.out; echo "⚠️ 第 $j 組範例的預期輸出是空的，已刪掉這組" >&2; done
+    k=$(ls tests/*.out 2>/dev/null | wc -l)
+    j=0; for f in $(ls tests/*.out 2>/dev/null | sort -V); do j=$((j+1)); [ "$f" = "tests/$j.out" ] || { mv "${f%.out}.in" "tests/$j.in"; mv "$f" "tests/$j.out"; }; done
     SID=$(grep -o 'S[0-9][0-9]' "$T/in.txt" | head -1)
     [ -f .pack_manual ] && SID=$(cat .pack_manual)   # 考生用 fb pack 指定過就以考生為準
     [ -n "$SID" ] && echo "$SID" > .sid
@@ -597,7 +806,7 @@ case "$STAGE" in
         fn=$(grep -m1 -oE '^def[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$f" | awk '{print $2}'); [ -n "$fn" ] && { echo "$fn()" >> "$f"; echo "（$f 只有定義函式，已補上呼叫 $fn()）" >&2; }
       fi
     done
-    SRCF=$(ls main.c main.py 2>/dev/null | head -1)
+    SRCF=$(ls main.c main.py 2>/dev/null | head -1); [ "$(cat .mode 2>/dev/null)" = proj ] && SRCF=$(cat .fb_target 2>/dev/null)
     stress_run; stress_after $? "$SRCF" ;;
   write|fix)
     MODE=$(cat .mode 2>/dev/null); PREF=c; grep -qiE '(用|使用|以)[[:space:]]*python|python[[:space:]]*3?[[:space:]]*(撰寫|實作|作答|寫)|in python' problem.txt && PREF=py; [ "$MODE" = ros ] && PREF=py
@@ -640,12 +849,50 @@ case "$STAGE" in
         echo "⚠️ 看不出 AI 要改哪個檔案。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
         echo "（上一次你沒有標出要改的檔案，或檔名不存在。程式碼區塊第一行一定要寫 // FILE: 檔名，檔名必須是專案裡已有的檔案：$(find . -maxdepth 2 -name '*.[ch]' ! -path './.fb*' | sed 's#^\./##' | tr '\n' ' ')）"; print_write; rm -rf "$T"; exit 0
       fi
+      PROT=$(python3 - <<'FB_PYPROT'
+import re
+t = open("problem.txt", encoding="utf-8", errors="replace").read().split("【專案裡的檔案】")[0]
+out = set()
+for s in re.split(r"[。\n]", t):   # 題目說「不要修改／不要改／不要動」的檔案
+    m = re.search(r"(不要|不可以?|不能|請勿|禁止|勿)\S{0,2}(修改|改|動)", s)
+    if not m: continue
+    if re.search(r"完成|修正|只修改|只改|請改|請修改", s): s = s[m.start():]
+    out.update(re.findall(r"[A-Za-z0-9_./-]+\.(?:c|h|py)\b", s))
+print(" ".join(sorted(out)))
+FB_PYPROT
+)
+      isprot() { local p; for p in $PROT; do [ "$1" = "$p" ] || [ "$(basename "$1")" = "$p" ] && return 0; done; return 1; }
+      if isprot "$TG"; then   # 選到的區塊是不能改的檔案：改用其他有 FILE: 而且可以改的區塊
+        for i in $(seq 1 "$NB"); do
+          F3=$(grep -m1 -oE 'FILE:[[:space:]]*[A-Za-z0-9_./-]+' "$T/b$i.body" | sed 's/FILE:[[:space:]]*//'); [ -n "$F3" ] || continue
+          [ -f "$F3" ] || { F3=$(find . -maxdepth 2 -name "$(basename "$F3")" ! -path './.fb*' | pick_by_problem); F3=${F3#./}; }
+          [ -n "$F3" ] && [ -f "$F3" ] && ! isprot "$F3" && { PICK=$i; TG=$F3; }
+        done
+      fi
+      if isprot "$TG"; then
+        echo "⚠️ AI 改的是題目說不能改的 $TG，沒有寫入。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+        echo "（上一次你改了 $TG，但題目說不能改：$PROT。請改題目要求的檔案$( [ -s .fb_target ] && echo "（$(cat .fb_target)）")，區塊第一行寫 // FILE: 那個檔名。）"; print_write; rm -rf "$T"; exit 0
+      fi
+      for i in $(seq 1 "$NB"); do   # AI 一次改了好幾個檔案（每個區塊都有 FILE:）：其他檔案也寫入（題目說不能改的除外）
+        [ "$i" = "$PICK" ] && continue
+        F3=$(grep -m1 -oE 'FILE:[[:space:]]*[A-Za-z0-9_./-]+' "$T/b$i.body" | sed 's/FILE:[[:space:]]*//'); [ -n "$F3" ] || continue
+        [ -f "$F3" ] || { F3=$(find . -maxdepth 2 -name "$(basename "$F3")" ! -path './.fb*' | pick_by_problem); F3=${F3#./}; }
+        [ -n "$F3" ] && [ -f "$F3" ] && [ "$F3" != "$TG" ] || continue
+        if isprot "$F3"; then echo "（AI 也改了 $F3，但題目說不能改，沒有寫入）" >&2; continue; fi
+        [ -e ".fb_bak/$F3" ] || { mkdir -p ".fb_bak/$(dirname "$F3")"; cp "$F3" ".fb_bak/$F3"; }
+        cp "$T/b$i.body" "$F3"; echo "（也寫入 $F3）" >&2
+      done
       [ -e ".fb_bak/$TG" ] || { mkdir -p ".fb_bak/$(dirname "$TG")"; cp "$TG" ".fb_bak/$TG"; }
       cp "$T/b$PICK.body" "$TG"; echo "$TG" > .fb_target; echo "（已寫入 $TG，原檔備份在 .fb_bak/）" >&2
       OUT=$(PROJ=1 bash "$SELF" check "$TG")
     else
       rm -f main.c main.cpp main.py; cp "$T/b$PICK.body" "main.$EXT"
       if [ "$MODE" = ros ]; then
+        RT=$(cat .fb_target 2>/dev/null)
+        if [ -n "$RT" ] && [ -f "$RT" ] && [ "$EXT" = py ]; then
+          [ -e ".fb_bak/$RT" ] || { mkdir -p ".fb_bak/$(dirname "$RT")"; cp "$RT" ".fb_bak/$RT"; }
+          cp main.py "$RT"; echo "（也寫入 $RT，原檔備份在 .fb_bak/；交卷交 $RT）" >&2
+        fi
         for i in $(seq 1 "$NB"); do [ "$(cat "$T/b$i.tag")" = verify ] && { cp "$T/b$i.body" verify.sh; echo "（AI 更新了驗收腳本）" >&2; }; done
         fix_verify
         OUT=$(bash "$SELF" checkros)
@@ -653,9 +900,15 @@ case "$STAGE" in
         OUT=$(bash "$SELF" check "main.$EXT")
       fi
     fi
-    if printf '%s' "$OUT" | grep -q '全部通過' && [ "$MODE" = std ] && [ "${STRESS:-1}" = 1 ] && [ ! -f .fb_stress_ok ]; then
+    SF="main.$EXT"; [ "$MODE" = proj ] && SF="$TG"
+    NOIN=1; for f in tests/*.in; do [ -s "$f" ] && NOIN=0; done   # 所有測資輸入都是空的（程式不讀輸入）：對拍沒意義，不做
+    printf '%s' "$OUT" | grep -q '全部通過' && { mkdir -p .fb_pass; cp "$SF" ".fb_pass/$(basename "$SF")"; }   # 保留最後一個「目前測資全過」的版本（之後越改越壞時可以拿回來交）
+    if ! printf '%s' "$OUT" | grep -q '全部通過' && [ -f ".fb_pass/$(basename "$SF")" ] && printf '%s' "$OUT" | grep -qE '第一筆失敗：[0-9]+\.in'; then
+      echo "⚠️ 這一版連題目範例都錯了（之前通過範例的版本在 .fb_pass/$(basename "$SF")；時間不夠時可以 cp .fb_pass/$(basename "$SF") $SF 拿回來交）" >&2
+    fi
+    if printf '%s' "$OUT" | grep -q '全部通過' && [ "$MODE" != ros ] && [ "$NOIN" = 0 ] && [ "${STRESS:-1}" = 1 ] && [ ! -f .fb_stress_ok ]; then   # 專案模式（起始檔＋Makefile）也對拍＋最大規模計時（效能題、隱藏 bug、多執行緒題）
       if [ -s brute.py ] && [ -s gen.py ]; then   # 之前已經有暴力解＋產生器：直接再對拍，不用再問 AI
-        stress_run; stress_after $? "main.$EXT"
+        stress_run; stress_after $? "$SF"
       else
         echo brute > .stage
         echo "✅ 範例都過了。接著做「對拍」找隱藏測資的錯：把下面整段複製，到 AI 開新對話貼上（不想做就打 fb skip）：" >&2; echo "--------" >&2
@@ -699,7 +952,7 @@ emit() {  # 有 problem.txt 且還沒全部通過 → 輸出「開新對話直�
       echo "【前一版的錯誤（不要再犯）】"
     else
       echo "【修正任務】你是上機考解題助手。下面是題目、目前的程式和執行回報。先用一句話說錯在哪一行、為什麼，再給修正後的完整程式（只給一個程式碼區塊，程式裡不要寫註解）。輸出格式逐字照題目範例；不要心算。常見原因：輸出時重新讀取或重新計算了已經用掉的資料、欄位順序或位元順序弄反、型別溢位。"
-      echo "【題目】"; cat problem.txt; echo
+      echo "【題目】"; prob_wo "$SRC"; echo
       [ -f pack.txt ] && ! grep -q "👉 這一行只差在" "$REP" && { echo "【參考零件】（只是參考，和題目不同時以題目為準；只附前 12 行省長度）"; head -n 12 pack.txt; echo; }   # 純格式錯誤時不附情境包（包裡的範例格式可能和題目不同，會誤導）
       echo "【目前程式】"; echo '```'"$LTAG"; cat "$SRC"; echo '```'
     fi
@@ -731,7 +984,14 @@ compile_fail() {   # 印第一個錯誤（含 ld 的 undefined reference，原�
   emit; rm -f "$REP" "$REP.err" "$BIN"; exit 1
 }
 say "【執行回報】檔案：$SRC"
-if [ -n "$PROJ" ]; then   # 多檔案專案：用 make 編，執行檔＝這次 make 新產生的可執行檔（或 PROG=路徑 指定）
+if [ -n "$PROJ" ] && [[ "$SRC" != *.py ]] && [ ! -f Makefile ] && [ ! -f makefile ]; then   # 有起始檔但沒有 Makefile：gcc 編 SRC 和同資料夾的 .c（SRC 有 main 時，別的有 main 的 .c 不編）
+  LTAG=c; CS="$SRC"; HM=0; grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$SRC" && HM=1
+  for f in "$(dirname "$SRC")"/*.c; do [ "$f" -ef "$SRC" ] && continue; [ $HM = 1 ] && grep -qE '(int|void)[[:space:]]+main[[:space:]]*\(' "$f" && continue; CS="$CS $f"; done
+  gcc -O2 -Wall -Wextra -pthread -o .fb_app $CS -lm 2> "$REP.err" || compile_fail
+  RUN=./.fb_app; echo ./.fb_app > .fb_prog
+  W=$(grep -c 'warning' "$REP.err")
+  [ "$W" -gt 0 ] && { say "編譯（gcc $CS）：成功，但有 $W 個 warning（第一個如下）"; grep -m1 'warning' "$REP.err" | cut_lines 1 >> "$REP"; } || say "編譯（gcc $CS）：成功"
+elif [ -n "$PROJ" ] && [[ "$SRC" != *.py ]]; then   # 多檔案專案：用 make 編，執行檔＝這次 make 新產生的可執行檔（或 PROG=路徑 指定）
   LTAG=c; touch .fb_stamp
   if ! make > "$REP.mk" 2> "$REP.err"; then cat "$REP.mk" >> "$REP.err"; compile_fail; fi
   P=${PROG:-$(find . -maxdepth 2 -type f -perm -u+x -newer .fb_stamp ! -name '*.sh' ! -name '*.[ch]' ! -path './.fb*' | pick_by_problem "$(basename "$(dirname "$SRC")")")}
@@ -770,6 +1030,9 @@ shopt -s nullglob; INS=("$TDIR"/*.in)
 [ ${#INS[@]} -gt 0 ] && mapfile -t INS < <(printf '%s\n' "${INS[@]}" | sort -V)   # 10.in 排在 9.in 後面
 trim_tail() { awk '{a[NR]=$0} END{e=NR; while (e>0 && a[e]=="") e--; for (i=1;i<=e;i++) print a[i]}'; }
 tidy() { sed 's/[[:space:]]*$//' | trim_tail; }   # 行尾空白、結尾空行都不算錯
+NT=0; for f in "$TDIR"/*.out; do grep -qE '[0-9][[:space:]]*((ms|us|ns|sec|secs|seconds|CPUs?|cpus?|cores?|times)\b|毫秒|秒)' "$f" 2>/dev/null && NT=1; done
+ntime() { if [ $NT = 1 ]; then sed -E 's/[[:space:]]*[0-9]+(\.[0-9]+)?[[:space:]]*((ms|us|ns|sec|secs|seconds|CPUs?|cpus?|cores?|times)\b|毫秒|秒)/ #\2/g'; else cat; fi; }   # 預期輸出有「61.2 ms」「12 CPUs」這種每台電腦都不同的數字：比對時不看這些數字
+[ $NT = 1 ] && say "（預期輸出含執行時間／CPU 數等每次不同的數字：比對時這些數字不算）"
 if [ ${#INS[@]} -eq 0 ]; then
   say "（沒有測資，直接執行一次，最多 ${TO} 秒）"
   S=$(date +%s%N); OUTP=$(timeout "$TO" $RUN < /dev/null 2>&1); RC=$?; E=$(( ($(date +%s%N)-S)/1000000 ))
@@ -777,10 +1040,15 @@ if [ ${#INS[@]} -eq 0 ]; then
   say "--- 輸出（前 15 行）---"; printf '%s\n' "$OUTP" | cut_lines 15 >> "$REP"
 else
   PASS=0; MAXE=0; FAILED=""; TOTAL=${#INS[@]}
+  RN=1; grep -qE 'pthread_create|thrd_create|fork[[:space:]]*\(' "$SRC" 2>/dev/null && RN=3   # 多執行緒：每筆測資跑 3 次，有一次錯就算錯（race 不一定每次都出現）
+  [ $RN -gt 1 ] && say "（多執行緒程式：每筆測資跑 $RN 次，每次都要對）"
   for IN in "${INS[@]}"; do
-    EXP="${IN%.in}.out"; S=$(date +%s%N)
-    GOT=$(runone "$IN" 2>"$REP.se"); RC=$?; E=$(( ($(date +%s%N)-S)/1000000 )); [ $E -gt $MAXE ] && MAXE=$E
-    if [ $RC -eq 0 ] && [ -f "$EXP" ] && diff -q <(printf '%s\n' "$GOT" | tidy) <(tidy < "$EXP") >/dev/null; then
+    EXP="${IN%.in}.out"
+    for r in $(seq 1 $RN); do
+      S=$(date +%s%N); GOT=$(runone "$IN" 2>"$REP.se"); RC=$?; E=$(( ($(date +%s%N)-S)/1000000 )); [ $E -gt $MAXE ] && MAXE=$E
+      [ $RC -eq 0 ] && [ -f "$EXP" ] && diff -q <(printf '%s\n' "$GOT" | tidy | ntime) <(tidy < "$EXP" | ntime) >/dev/null || break
+    done
+    if [ $RC -eq 0 ] && [ -f "$EXP" ] && diff -q <(printf '%s\n' "$GOT" | tidy | ntime) <(tidy < "$EXP" | ntime) >/dev/null; then
       PASS=$((PASS+1))
     elif [ -z "$FAILED" ]; then
       FAILED="$IN"; FRC=$RC; FE=$E; FGOT="$GOT"; FSE=$(head -n 15 "$REP.se" | cut -c1-160)
@@ -794,7 +1062,7 @@ else
     say "你的輸出（前 8 行）："; printf '%s\n' "$FGOT" | cut_lines 8 >> "$REP"
     [ -n "$FSE" ] && { say "你的 stderr（除錯輸出，前 15 行）："; printf '%s\n' "$FSE" >> "$REP"; }
     # 改進：逐字指出第一個不同的行與字元位置，空白顯示成 ␣（小模型看不出「x1,x0」和「x1, x0」的差別）
-    printf '%s\n' "$FGOT" > "$REP.got"
+    printf '%s\n' "$FGOT" | ntime > "$REP.got"; ntime < "${FAILED%.in}.out" > "$REP.exp"
     awk -v gf="$REP.got" '
       { e[++ne]=$0 }
       END {
@@ -818,9 +1086,9 @@ else
             exit
           }
         }
-      }' "${FAILED%.in}.out" >> "$REP"
+      }' "$REP.exp" >> "$REP"
     say "（␣ 代表一個空白。請逐字對照題目的輸出格式，格式以題目為準，不是情境包。）"
-    rm -f "$REP.got"
+    rm -f "$REP.got" "$REP.exp"
     say "請找出原因並修正，給完整程式。不要心算，必要時加 printf 除錯。"
   else
     say "全部通過。（最慢一筆 ${MAXE} ms）"

@@ -162,6 +162,7 @@ int main(void) {
 @@@ S05
 【情境 S05：校驗碼 CRC-32／CRC-16-CCITT／加總／同位元】
 重點：CRC-32(IEEE)＝反射版 poly 0xEDB88320、init 與 xorout 0xFFFFFFFF，"123456789"→CBF43926；CRC-16-CCITT＝poly 0x1021、init 0xFFFF、不反射→29B1。
+CRC-16 變體（"123456789" 的值，參數照 crc_generic 順序）：MODBUS (16,0x8005,0xFFFF,1,1,0)→4B37（＝題目常寫的右移法：c^=byte；8 次 c=(c&1)?(c>>1)^0xA001:c>>1）；XMODEM (16,0x1021,0,0,0,0)→31C3；KERMIT (16,0x1021,0,1,1,0)→2189；CRC-8 (8,0x07,0,0,0,0)→F4。Modbus 傳送時低位元組先送。
 陷阱：題目給新參數就用 crc_generic(寬度,poly,init,refin,refout,xorout)，poly 填「不反射」寫法（例 0x04C11DB7）。RP2350 sniffer 0x0/0x2/0xf/0xe＝CRC32/CRC16/加總/XOR 化簡，位元順序是否同標準未查證，以題目為準。
 #include <stdio.h>
 #include <stdint.h>
@@ -338,6 +339,9 @@ int main(void){ /* 1 加到 10：x1=sum x2=i x3=11 */
 陷阱：PUSH/PULL 共用 100，bit7=0 push、1 pull，bits4:0 必須 0（bit4=1 變 mov rxfifo）；pioasm 預設 block → push=0x8020 不是 0x8000。
 side-set 佔 [12:8] 高位：.side_set n → delay 只剩 5-n 位；opt 再吃 1 位（bit12=enable）。JMP 位址相對程式開頭，SDK 載入自動加 offset。
 驗算：out x,32=6020 in x,32=4020 push=8020 pull=80a0 nop(mov y,y)=a042 jmp x-- 3=0043 set pindirs,1=e081 set pins,1 [1]=e101 wait 1 gpio 3=2083 mov x,osr=a027 in null,24=4078
+文字格式以題目為準（題目寫 jmp x--, 3 就照印逗號）。組譯讀一行：先砍 ; 註解、跳過空行與 . 開頭；結尾 : 的是標籤（先掃一輪記位址，第二輪再編碼）；先取 [n] 當 delay，再把逗號換空白才切 token（不然 "x," 對不到 x）：
+  char *c=strchr(s,';'); if(c)*c=0; int d=0; char *b=strchr(s,'['); if(b){d=atoi(b+1);*b=0;} for(char*p=s;*p;p++) if(*p==',') *p=' ';
+  char t[4][32]={{0}}; int n=sscanf(s,"%31s %31s %31s %31s",t[0],t[1],t[2],t[3]);   /* jmp 有沒有條件看 n：jmp L → n=2；jmp x-- L → n=3 */
 #include <stdint.h>
 #include <stdio.h>
 #define PK(op,ds,mid,low) ((uint16_t)(((op)<<13)|(((ds)&31)<<8)|(((mid)&7)<<5)|((low)&31)))

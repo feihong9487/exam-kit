@@ -21,6 +21,7 @@ fb
 
 | 指令 | 用途 |
 | --- | --- |
+| `fb task` | 任務模式：不是寫程式的題目（ros2 觀察、Makefile、git 衝突、在專案裡找要改哪裡）；AI 給檔案與指令，確認後照做 |
 | `fb submit` | 交卷：把通過的程式放進 GitLab 作答專案，commit＋push（第一次會問網址與檔名） |
 | `fb ci` | GitLab CI 沒過：貼上 job log，產生給 AI 的修正任務 |
 | `fb test` | 不貼東西，直接重跑目前的程式 |
