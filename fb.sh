@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fb.sh v4（考場版）— 你當手腳、考場 AI 當大腦：每一輪都只做同一個動作。
+# fb.sh v5（考場版：一般題＋ROS 2 題）— 你當手腳、考場 AI 當大腦：每一輪都只做同一個動作。
 #   ① 終端機打 ./fb.sh ，貼上「題目」或「AI 的整段回覆」，Enter 後按 Ctrl-D
 #   ② 把終端機印出來的內容整段複製，到考場 AI「開新對話」貼上
 #   ③ 把 AI 的整段回覆複製，回到 ①；直到出現「🎉 全部通過」
@@ -11,6 +11,77 @@
 # 需要同資料夾或 fb.sh 旁邊有 packs.txt（30 個情境包）。每一題建議用一個新資料夾。
 SELF="$(readlink -f "$0")"; HERE="$(dirname "$SELF")"
 PACKS="${PACKS:-$HERE/packs.txt}"; [ -f "$PACKS" ] || PACKS="./packs.txt"
+
+if [ "$1" = "checkros" ]; then
+  LIMIT=1800; VER="${VERIFY:-verify.sh}"; EXPF="${EXPECT:-expected.txt}"
+  REP=$(mktemp); say() { printf '%s\n' "$*" >> "$REP"; }
+  source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || { echo "❌ 找不到 ROS 2（/opt/ros/jazzy/setup.bash）"; exit 1; }
+  export ROS_DOMAIN_ID=$(( RANDOM % 80 + 20 ))
+  LIB=$(mktemp)
+  cat > "$LIB" <<'FB_ROSLIB'
+_f() { echo "/tmp/fbros_$(echo "$1" | tr '/' '_')"; }
+grab() { timeout 12 ros2 topic echo "$1" > "$(_f "$1")" 2>&1 & GRAB_PIDS="$GRAB_PIDS $!"; sleep 2; }
+send() { timeout 10 ros2 topic pub --once -w 1 "$1" "$2" "$3" > /dev/null 2>&1 || echo "（send $1 失敗：沒有節點訂閱 $1，或型別／YAML 寫錯）"; sleep 0.7; }
+show() { sleep 1; for p in $GRAB_PIDS; do kill -INT "$p" 2>/dev/null; done; wait $GRAB_PIDS 2>/dev/null; GRAB_PIDS=""; echo "== $1 收到："; grep -vE '^---$|WARNING|does not appear' "$(_f "$1")" | head -40; }
+call() { echo "== call $1："; timeout 12 ros2 service call "$1" "$2" "$3" 2>&1 | tail -3; }
+FB_ROSLIB
+  rm -f /tmp/fbros_*
+  say "【執行回報（ROS 2）】檔案：main.py"
+  if ! python3 -m py_compile main.py 2> "$REP.err"; then
+    say "結果：Python 語法錯誤"; head -n 8 "$REP.err" | cut -c1-160 >> "$REP"; ROSPASS=0
+  else
+    python3 main.py > node.log 2>&1 & NP=$!
+    sleep 4
+    if kill -0 "$NP" 2>/dev/null; then ALIVE=1; else ALIVE=0; fi
+    say "--- 節點啟動 4 秒後的 ROS 圖 ---"
+    say "節點：$(ros2 node list 2>/dev/null | tr '\n' ' ')"
+    for t in $(ros2 topic list 2>/dev/null | grep -vE '^/(rosout|parameter_events)$'); do
+      I=$(ros2 topic info "$t" 2>/dev/null)
+      say "topic $t  型別=$(echo "$I" | sed -n 's/^Type: //p')  發佈者=$(echo "$I" | sed -n 's/^Publisher count: //p')  訂閱者=$(echo "$I" | sed -n 's/^Subscription count: //p')"
+    done
+    S2=$(ros2 service list 2>/dev/null | grep -vE '/(describe|get|list|set)_parameters|parameter_types|type_description' | tr '\n' ' ')
+    [ -n "$S2" ] && say "service：$S2"
+    if [ $ALIVE -eq 1 ] && [ -s "$VER" ]; then
+      timeout 60 bash -c "source '$LIB'; source '$VER'" > verify.out 2>&1
+      say "--- 驗收腳本輸出（前 25 行）---"; head -n 25 verify.out | cut -c1-160 >> "$REP"
+    elif [ $ALIVE -eq 1 ]; then say "（沒有驗收腳本，只檢查節點有沒有正常啟動）"; : > verify.out; fi
+    kill -INT "$NP" 2>/dev/null; sleep 2; kill -9 "$NP" 2>/dev/null
+    ROSPASS=1
+    [ $ALIVE -eq 0 ] && { say "❌ 節點啟動後就結束了（可能程式出錯或沒有 spin）"; ROSPASS=0; }
+    if grep -q "Traceback" node.log; then
+      say "❌ 節點有錯誤（Traceback；若是在 Ctrl-C 之後才出現，代表沒有處理 ExternalShutdownException）"; ROSPASS=0
+    fi
+    if [ -s "$EXPF" ] && [ $ALIVE -eq 1 ]; then
+      MISS=""; while IFS= read -r L; do
+        L2=$(printf '%s' "$L" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'); [ -z "$L2" ] && continue
+        grep -qF -- "$L2" verify.out || MISS="$MISS$L2"$'\n'
+      done < "$EXPF"
+      say "--- 預期要看到的行 ---"; head -n 12 "$EXPF" | cut -c1-160 >> "$REP"
+      if [ -n "$MISS" ]; then say "--- 驗收輸出裡缺少的行 ---"; printf '%s' "$MISS" | head -n 8 >> "$REP"; ROSPASS=0; fi
+    fi
+    if [ $ROSPASS -eq 0 ]; then say "--- 節點自己的輸出／錯誤（最後 15 行）---"; tail -n 15 node.log | cut -c1-160 >> "$REP"; fi
+  fi
+  if [ $ROSPASS -eq 1 ]; then say "測資：1 / 1 通過"; say "全部通過。"
+  else say "測資：0 / 1 通過"; say "請找出原因並修正，給完整程式。如果你判斷是驗收腳本寫錯，可以另外附一個以「【驗收腳本】」開頭的 ${FENCE:-\`\`\`}bash 區塊。"; fi
+  N=0
+  if [ $ROSPASS -eq 0 ]; then
+    SIG=$(grep -m3 -E '缺少|❌|Traceback|錯誤' "$REP" | md5sum | cut -c1-12)
+    if [ "$SIG" = "$(cat .fb_sig 2>/dev/null)" ]; then N=$(( $(cat .fb_n 2>/dev/null || echo 0) + 1 )); fi
+    echo "$SIG" > .fb_sig; echo "$N" > .fb_n
+    if [ "$N" -ge 2 ]; then
+      echo "【重寫任務】你是上機考解題助手。前一版 ROS 2 程式已經連續 $((N+1)) 次犯同一個錯，修補沒有用。不要沿用舊程式，依照題目從頭重新寫一個完整的 rclpy 程式（只給一個 ${FENCE:-\`\`\`}python 區塊，不要寫註解）。寫之前先用 3 行列出：要建立哪些 publisher／subscriber／service（名稱、型別），每個 callback 做什麼。"
+    else
+      echo "【修正任務】你是上機考解題助手（ROS 2 Jazzy，rclpy）。下面是題目、驗收腳本、預期輸出、目前的程式和執行回報。先用一句話說錯在哪、為什麼，再給修正後的完整程式（只給一個 ${FENCE:-\`\`\`}python 區塊，不要寫註解）。常見原因：topic 名稱或型別和題目不同、忘了 publish、callback 沒被呼叫、沒處理 ExternalShutdownException。"
+    fi
+    echo "【題目】"; cat problem.txt; echo
+    [ -f pack.txt ] && { echo "【參考零件】（只是參考，和題目不同時以題目為準）"; cat pack.txt; echo; }
+    [ -s "$VER" ] && { echo "【驗收腳本】（用 grab／send／show／call 指令）"; cat "$VER"; echo; }
+    [ "$N" -lt 2 ] && { echo "【目前程式】"; echo '```python'; cat main.py; echo '```'; }
+    [ "$N" -ge 2 ] && echo "【前一版的錯誤（不要再犯）】"
+  else rm -f .fb_sig .fb_n; fi
+  head -c $LIMIT "$REP"; echo
+  rm -f "$REP" "$REP.err" "$LIB" /tmp/fbros_*; exit 0
+fi
 
 if [ "$1" != "check" ]; then
 FENCE='```'
@@ -62,6 +133,28 @@ S30 ROS 2 action 骨架
 FB_PSEL
 cat problem.txt
 }
+print_select_ros() {
+cat <<'FB_PSELR'
+你是上機考解題助手（ROS 2 Jazzy，Python rclpy）。讀完下面的題目，照順序回答完就停，不要寫節點程式：
+【需要情境】從這些挑 1 個最相關的：S24 publisher／subscriber、S25 service、S26 參數＋namespace、S28 多機器人派單、S29 統計＋QoS、S30 action
+【驗收腳本】寫一個 bash 腳本，驗證「已經在背景執行中的節點」有沒有照題目運作，放在一個 ```bash 區塊。只能用下面四個現成指令，不要自己啟動或關閉節點，不要寫 sleep：
+  grab /主題                     開始在背景收這個 topic 的訊息（一定要先 grab 再 send）
+  send /主題 型別 '{欄位: 值}'      送一筆訊息，例：send /number std_msgs/msg/Int32 '{data: 5}'
+  show /主題                     印出收到的每一筆訊息（例：data: 10）
+  call /服務 型別 '{欄位: 值}'      呼叫 service，印出回應
+【預期輸出】驗收腳本正確時，show／call 應該印出的關鍵行，每行一個（例：data: 15.0），放在一個 ``` 區塊。
+【題目】
+FB_PSELR
+cat problem.txt
+}
+print_write_ros() {
+cat <<'FB_PCODER'
+你是上機考解題助手。根據下面的【題目】寫一個完整的 ROS 2 Jazzy Python（rclpy）程式，用 python3 main.py 直接執行（不打包）。
+規則：1. topic／service 名稱、型別、欄位照題目；題目沒寫開頭斜線就用相對名稱。2. 需要多個節點時，在同一支程式用 MultiThreadedExecutor 一起 spin。3. 結尾一定要：try: rclpy.spin(node)（或 executor.spin()） except (KeyboardInterrupt, ExternalShutdownException): pass finally: rclpy.try_shutdown()，並 from rclpy.executors import ExternalShutdownException。4. 【參考零件】只是參考，和題目不同時以題目為準。5. 只輸出一個 ```python 程式碼區塊，程式裡不要寫註解，前面最多 2 行說明。
+FB_PCODER
+echo "【題目】"; cat problem.txt
+[ -f pack.txt ] && { echo "【參考零件】"; cat pack.txt; }
+}
 print_write() {
 cat <<'FB_PCODE'
 你是上機考解題助手。根據下面的【題目】寫出完整、單一檔案、可直接編譯的 C 程式（gcc -O2 -Wall -pthread，#include 要齊全），從 stdin 讀、寫到 stdout。
@@ -86,7 +179,8 @@ split_blocks() {   # 把貼上的回覆拆成程式碼區塊：$1/b<n>.lang .tag
     inb && line ~ /^[ \t]*```[ \t]*$/ { inb=0; close(D "/b" n ".body"); next }
     inb { print line >> (D "/b" n ".body"); next }
     line ~ /範例輸入/ { tag="in" }
-    line ~ /範例輸出/ { tag="out" }
+    line ~ /範例輸出|預期輸出/ { tag="out" }
+    line ~ /驗收/ { tag="verify" }
     END { print n > (D "/count") }' "$1/in.txt"
 }
 norm() { tr -d ' \t\r\n' ; }
@@ -101,11 +195,13 @@ case "$1" in
          mkdir -p "$T/tests"; echo "1 2" > "$T/tests/1.in"; echo "3" > "$T/tests/1.out"
          (cd "$T" && bash "$SELF" check main.c) | grep -q '全部通過' && echo "✅ 編譯＋測資比對正常" || { echo "❌ 編譯／測資比對失敗"; ok=0; }
          rm -rf "$T"
+         if [ -f /opt/ros/jazzy/setup.bash ]; then echo "✅ ROS 2 Jazzy 可用（ROS 題可自動驗收）"; else echo "ℹ️ 這個環境沒有 ROS 2 Jazzy（遇到 ROS 題時，要在有 ROS 的終端機裡用 fb）"; fi
          [ $ok -eq 1 ] && echo "🎉 環境全部正常" || echo "⚠️ 有項目失敗，請看上面的 ❌"
          exit 0 ;;
-  reset) rm -rf .stage .sid problem.txt pack.txt main.c main.py .fb_sig .fb_n tests
+  reset) rm -rf .stage .sid .mode problem.txt pack.txt main.c main.py .fb_sig .fb_n tests verify.sh expected.txt node.log verify.out
          echo "已清空。開始新的一題：./fb.sh 然後貼上題目"; exit 0 ;;
-  test)  for f in main.c main.py; do [ -f "$f" ] && exec bash "$SELF" check "$f"; done
+  test)  [ "$(cat .mode 2>/dev/null)" = ros ] && exec bash "$SELF" checkros
+         for f in main.c main.py; do [ -f "$f" ] && exec bash "$SELF" check "$f"; done
          echo "還沒有程式"; exit 1 ;;
   pack)  get_pack "$2" && echo "已換成情境 $2（下一次 ./fb.sh 會附上）" || echo "packs.txt 裡沒有 $2"; exit 0 ;;
 esac
@@ -125,9 +221,25 @@ T=$(mktemp -d); printf '%s\n' "$IN" > "$T/in.txt"; split_blocks "$T"; NB=$(cat "
 case "$STAGE" in
   start)
     printf '%s\n' "$IN" > problem.txt; echo select > .stage
-    echo "✅ 已存題目。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
-    print_select ;;
+    if grep -qiE 'ros ?2|rclpy|ros2 |topic|publisher|subscriber|節點' problem.txt; then echo ros > .mode; else echo std > .mode; fi
+    echo "✅ 已存題目（題型：$( [ "$(cat .mode)" = ros ] && echo 'ROS 2' || echo '一般輸入輸出' )）。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
+    if [ "$(cat .mode)" = ros ]; then print_select_ros; else print_select; fi ;;
   select)
+    if [ "$(cat .mode 2>/dev/null)" = ros ]; then
+      rm -f verify.sh expected.txt
+      for i in $(seq 1 "$NB"); do
+        tg=$(cat "$T/b$i.tag"); lg=$(tr 'A-Z' 'a-z' < "$T/b$i.lang" | tr -d ' \r')
+        if [ "$tg" = verify ] || { [ ! -f verify.sh ] && [[ "$lg" =~ ^(bash|sh|shell)$ ]]; }; then cp "$T/b$i.body" verify.sh
+        elif [ "$tg" = out ]; then cp "$T/b$i.body" expected.txt; fi
+      done
+      SID=$(grep -o 'S[0-9][0-9]' "$T/in.txt" | head -1); [ -n "$SID" ] && echo "$SID" > .sid
+      rm -f pack.txt; [ -n "$SID" ] && get_pack "$SID"
+      echo write > .stage
+      echo "✅ 驗收腳本：$( [ -s verify.sh ] && echo 有 || echo 沒有)；預期輸出：$( [ -s expected.txt ] && echo "$(grep -c . expected.txt) 行" || echo 沒有)；情境：${SID:-無}。把下面整段複製，到 AI 開新對話貼上：" >&2
+      [ -s verify.sh ] || echo "⚠️ AI 沒給驗收腳本；之後只能檢查節點有沒有正常啟動。" >&2
+      echo "--------" >&2
+      print_write_ros; rm -rf "$T"; exit 0
+    fi
     rm -rf tests; mkdir -p tests; k=0; kin=0; kout=0
     for i in $(seq 1 "$NB"); do
       tg=$(cat "$T/b$i.tag")
@@ -159,10 +271,16 @@ case "$STAGE" in
     done
     if [ -z "$PICK" ]; then
       echo "⚠️ AI 的回覆裡沒有程式碼區塊。把下面整段複製，到 AI 開新對話貼上：" >&2; echo "--------" >&2
-      echo "（上一次你沒有給程式碼。請只給一個完整、可編譯的 ${FENCE}c 程式碼區塊。）"; print_write; exit 0
+      if [ "$(cat .mode 2>/dev/null)" = ros ]; then echo "（上一次你沒有給程式碼。請只給一個完整的 ${FENCE}python 程式碼區塊。）"; print_write_ros
+      else echo "（上一次你沒有給程式碼。請只給一個完整、可編譯的 ${FENCE}c 程式碼區塊。）"; print_write; fi; exit 0
     fi
     rm -f main.c main.py; cp "$T/b$PICK.body" "main.$EXT"
-    OUT=$(bash "$SELF" check "main.$EXT")
+    if [ "$(cat .mode 2>/dev/null)" = ros ]; then
+      for i in $(seq 1 "$NB"); do [ "$(cat "$T/b$i.tag")" = verify ] && { cp "$T/b$i.body" verify.sh; echo "（AI 更新了驗收腳本）" >&2; }; done
+      OUT=$(bash "$SELF" checkros)
+    else
+      OUT=$(bash "$SELF" check "main.$EXT")
+    fi
     if printf '%s' "$OUT" | grep -q '全部通過'; then
       echo done > .stage; printf '%s\n' "$OUT"
       echo "🎉 全部通過！可以交卷（git add -A && git commit -m ... && git push，或交 OJ）。下一題：./fb.sh reset" >&2
