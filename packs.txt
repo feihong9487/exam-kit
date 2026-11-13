@@ -1,0 +1,1351 @@
+@@@ S01
+【情境 S01：位元欄位取出／填入／符號延伸】
+重點：遮罩用 0xFFFFFFFFu>>(32-w)，w=32 也安全；不要寫 (1u<<w)-1（w=32 時是未定義行為）。w=0 要特判。
+陷阱：填入時 v 要先 & 遮罩，否則會污染隔壁欄位；符號延伸用 (v^sign)-sign；全部用 uint32_t，不要用 int 做位移。
+#include <stdio.h>
+#include <stdint.h>
+#define MASK(w) (0xFFFFFFFFu >> (32 - (w)))
+#define GETF(x,hi,lo) (((uint32_t)(x) >> (lo)) & MASK((hi)-(lo)+1))
+#define SETF(x,hi,lo,v) (((uint32_t)(x) & ~(MASK((hi)-(lo)+1) << (lo))) | (((uint32_t)(v) & MASK((hi)-(lo)+1)) << (lo)))
+uint32_t get_bits(uint32_t x, int lo, int w) {          /* 從第 lo 位取 w 位 */
+    if (w <= 0) return 0;
+    return (x >> lo) & MASK(w);
+}
+uint32_t set_bits(uint32_t x, int lo, int w, uint32_t v) { /* 把 v 填進 [lo, lo+w) */
+    if (w <= 0) return x;
+    uint32_t m = MASK(w) << lo;
+    return (x & ~m) | ((v << lo) & m);
+}
+int32_t sign_ext(uint32_t v, int w) {                   /* w 位元二補數 -> int32 */
+    if (w <= 0) return 0;
+    if (w >= 32) return (int32_t)v;
+    uint32_t s = 1u << (w - 1);
+    v &= MASK(w);
+    return (int32_t)((v ^ s) - s);
+}
+int32_t get_sbits(uint32_t x, int lo, int w) { return sign_ext(get_bits(x, lo, w), w); }
+int main(void) {
+    printf("%X\n", get_bits(0xABCD1234u, 4, 8));   /* 23 */
+    printf("%X\n", set_bits(0, 4, 4, 0xF));        /* F0 */
+    printf("%d\n", sign_ext(0x800, 12));           /* -2048 */
+    printf("%u\n", GETF(0x00500093u, 31, 20));     /* 5 */
+    printf("%X\n", SETF(0u, 11, 7, 5));            /* 280 */
+    printf("%d\n", get_sbits(0xfff00093u, 20, 12));/* -1 */
+    return 0;
+}
+@@@ S02
+【情境 S02：依規格重排位元（反轉／nibble、byte 交換／旋轉／對照表搬移）】
+重點：先看規格是「輸出 bit j 來自輸入 bit perm[j]」(gather) 還是「輸入 bit i 搬到 perm[i]」(scatter)，兩者互為反運算，用錯答案就整個反過來。
+陷阱：uint8_t/uint16_t 運算會被提升成 int，結果要轉型回去；旋轉 r=0 時 x>>(32-r) 是未定義行為要特判；8/16 位反轉用 rev_n(x,8)/rev_n(x,16)。
+#include <stdio.h>
+#include <stdint.h>
+uint32_t rev_n(uint32_t x, int n) {          /* 反轉低 n 位 */
+    uint32_t r = 0;
+    for (int i = 0; i < n; i++) r = (r << 1) | ((x >> i) & 1u);
+    return r;
+}
+uint32_t rev32(uint32_t x) {
+    x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);
+    x = ((x >> 2) & 0x33333333u) | ((x & 0x33333333u) << 2);
+    x = ((x >> 4) & 0x0F0F0F0Fu) | ((x & 0x0F0F0F0Fu) << 4);
+    x = ((x >> 8) & 0x00FF00FFu) | ((x & 0x00FF00FFu) << 8);
+    return (x >> 16) | (x << 16);
+}
+uint32_t swap_nibbles32(uint32_t x) { return ((x & 0x0F0F0F0Fu) << 4) | ((x & 0xF0F0F0F0u) >> 4); }
+uint32_t bswap32(uint32_t x) { return (x >> 24) | ((x >> 8) & 0xFF00u) | ((x << 8) & 0xFF0000u) | (x << 24); }
+uint32_t rotl32(uint32_t x, unsigned r) { r &= 31; return r ? (x << r) | (x >> (32 - r)) : x; }
+uint32_t gather(uint32_t x, const int *p, int n) {   /* 輸出 j = 輸入 p[j] */
+    uint32_t r = 0;
+    for (int j = 0; j < n; j++) r |= ((x >> p[j]) & 1u) << j;
+    return r;
+}
+uint32_t scatter(uint32_t x, const int *p, int n) {  /* 輸入 i -> 輸出 p[i] */
+    uint32_t r = 0;
+    for (int i = 0; i < n; i++) r |= ((x >> i) & 1u) << p[i];
+    return r;
+}
+int main(void) {
+    int perm[8] = {1, 0, 3, 2, 5, 4, 7, 6};
+    printf("%02X\n", rev_n(0xB4, 8));              /* 2D */
+    printf("%04X\n", rev_n(0x1234, 16));           /* 2C48 */
+    printf("%08X\n", rev32(0x12345678u));          /* 1E6A2C48 */
+    printf("%08X\n", swap_nibbles32(0x12345678u)); /* 21436587 */
+    printf("%08X\n", bswap32(0x12345678u));        /* 78563412 */
+    printf("%08X\n", rotl32(0x12345678u, 8));      /* 34567812 */
+    printf("%02X\n", gather(0xB4, perm, 8));       /* 78 */
+    printf("%02X\n", scatter(0x01, perm, 8));      /* 02 */
+    return 0;
+}
+@@@ S03
+【情境 S03：位元流讀取器（MSB／LSB-first 讀 n 位元欄位）】
+重點：MSB-first＝每個 byte 從 bit7 讀起、先讀到的位元放欄位高位；LSB-first＝從 bit0 讀起、先讀到的放低位（等於把 bytes 當小端整數）。
+陷阱：有些格式是混合規則（例如位元 MSB-first 取、值卻用 LSB 組），一定要拿題目範例手算一次；讀超過尾端要報錯；n=32 時不要用 1u<<n。
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+typedef struct { const uint8_t *buf; size_t nbits, pos; int lsb, err; } BR;
+void br_init(BR *b, const uint8_t *buf, size_t nbytes, int lsb) {
+    b->buf = buf; b->nbits = nbytes * 8; b->pos = 0; b->lsb = lsb; b->err = 0;
+}
+uint32_t br_read(BR *b, int n) {               /* n = 1..32 */
+    uint32_t v = 0;
+    if (n <= 0 || n > 32 || b->pos + (size_t)n > b->nbits) { b->err = 1; return 0; }
+    for (int i = 0; i < n; i++) {
+        uint8_t by = b->buf[b->pos >> 3];
+        int k = (int)(b->pos & 7);
+        b->pos++;
+        uint32_t bit = b->lsb ? (by >> k) & 1u : (by >> (7 - k)) & 1u;
+        if (b->lsb) v |= bit << i;             /* 先讀到的放低位 */
+        else        v = (v << 1) | bit;        /* 先讀到的放高位 */
+    }
+    return v;
+}
+int main(void) {
+    const uint8_t a[] = {0xB4, 0x5F};          /* 1011 0100 0101 1111 */
+    int w[] = {3, 5, 4, 4};
+    BR b;
+    br_init(&b, a, 2, 0);
+    for (int i = 0; i < 4; i++) printf("%u ", br_read(&b, w[i]));
+    printf("\n");                              /* 5 20 5 15 */
+    br_init(&b, a, 2, 1);
+    for (int i = 0; i < 4; i++) printf("%u ", br_read(&b, w[i]));
+    printf("\n");                              /* 4 22 15 5 */
+    const uint8_t c[] = {0x12, 0x34, 0x56};
+    br_init(&b, c, 3, 0);
+    printf("%X\n", br_read(&b, 12));           /* 123 */
+    br_init(&b, c, 3, 1);
+    printf("%X\n", br_read(&b, 12));           /* 412 */
+    return 0;
+}
+@@@ S04
+【情境 S04：位元流寫入器（把 n 位元欄位依序打包成 byte 陣列）】
+重點：MSB-first 先寫欄位最高位、放在 byte 的 bit7 往下；LSB-first 先寫最低位、放在 bit0 往上。用 |= 寫入，所以緩衝區一定要先 memset 成 0。
+陷阱：總位元數不是 8 的倍數時最後一個 byte 補 0，輸出 byte 數 = (pos+7)/8；v 超過 n 位的部分不能寫進去；讀回驗證請配 S03 的讀取器（同一種模式）。
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+typedef struct { uint8_t *buf; size_t cap, pos; int lsb; } BW;
+void bw_init(BW *w, uint8_t *buf, size_t nbytes, int lsb) {
+    memset(buf, 0, nbytes);
+    w->buf = buf; w->cap = nbytes * 8; w->pos = 0; w->lsb = lsb;
+}
+int bw_write(BW *w, uint32_t v, int n) {       /* n = 1..32，空間不夠回傳 -1 */
+    if (n <= 0 || n > 32 || w->pos + (size_t)n > w->cap) return -1;
+    for (int i = 0; i < n; i++) {
+        uint32_t b = w->lsb ? (v >> i) & 1u : (v >> (n - 1 - i)) & 1u;
+        size_t by = w->pos >> 3;
+        int k = (int)(w->pos & 7);
+        if (b) w->buf[by] |= (uint8_t)(w->lsb ? (1u << k) : (0x80u >> k));
+        w->pos++;
+    }
+    return 0;
+}
+size_t bw_bytes(const BW *w) { return (w->pos + 7) / 8; }
+void dump(const uint8_t *b, size_t n) {
+    for (size_t i = 0; i < n; i++) printf("%02X ", b[i]);
+    printf("\n");
+}
+int main(void) {
+    uint8_t buf[16];
+    BW w;
+    bw_init(&w, buf, sizeof buf, 0);           /* MSB-first */
+    bw_write(&w, 5, 3); bw_write(&w, 20, 5); bw_write(&w, 5, 4); bw_write(&w, 15, 4);
+    dump(buf, bw_bytes(&w));                   /* B4 5F */
+    bw_init(&w, buf, sizeof buf, 1);           /* LSB-first */
+    bw_write(&w, 4, 3); bw_write(&w, 22, 5); bw_write(&w, 15, 4); bw_write(&w, 5, 4);
+    dump(buf, bw_bytes(&w));                   /* B4 5F */
+    bw_init(&w, buf, sizeof buf, 0);
+    bw_write(&w, 1, 1);
+    dump(buf, bw_bytes(&w));                   /* 80 */
+    return 0;
+}
+@@@ S05
+【情境 S05：校驗碼 CRC-32／CRC-16-CCITT／加總／同位元】
+重點：CRC-32(IEEE)＝反射版 poly 0xEDB88320、init 與 xorout 0xFFFFFFFF，"123456789"→CBF43926；CRC-16-CCITT＝poly 0x1021、init 0xFFFF、不反射→29B1。
+陷阱：題目給新參數就用 crc_generic(寬度,poly,init,refin,refout,xorout)，poly 填「不反射」寫法（例 0x04C11DB7）。RP2350 sniffer 0x0/0x2/0xf/0xe＝CRC32/CRC16/加總/XOR 化簡，位元順序是否同標準未查證，以題目為準。
+#include <stdio.h>
+#include <stdint.h>
+#include <stddef.h>
+uint32_t reflect(uint32_t v, int n) { uint32_t r = 0; for (int i = 0; i < n; i++) r = (r << 1) | ((v >> i) & 1u); return r; }
+uint32_t crc_generic(const uint8_t *d, size_t len, int w, uint32_t poly,
+                     uint32_t init, int refin, int refout, uint32_t xorout) {
+    uint32_t mask = 0xFFFFFFFFu >> (32 - w), top = 1u << (w - 1), c = init & mask;
+    for (size_t i = 0; i < len; i++) {
+        uint32_t b = refin ? reflect(d[i], 8) : d[i];
+        for (int k = 7; k >= 0; k--) {
+            uint32_t in = (b >> k) & 1u, msb = (c & top) ? 1u : 0u;
+            c = (c << 1) & mask;
+            if (msb ^ in) c ^= poly;
+        }
+    }
+    if (refout) c = reflect(c, w);
+    return (c ^ xorout) & mask;
+}
+uint32_t crc32_ieee(const uint8_t *d, size_t len) {
+    uint32_t c = 0xFFFFFFFFu;
+    for (size_t i = 0; i < len; i++) {
+        c ^= d[i];
+        for (int k = 0; k < 8; k++) c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
+    }
+    return ~c;
+}
+uint32_t crc16_ccitt(const uint8_t *d, size_t len) {
+    uint32_t c = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        c ^= (uint32_t)d[i] << 8;
+        for (int k = 0; k < 8; k++) c = (c & 0x8000u) ? ((c << 1) ^ 0x1021u) : (c << 1);
+        c &= 0xFFFFu;
+    }
+    return c;
+}
+uint32_t sum32(const uint8_t *d, size_t len) { uint32_t s = 0; for (size_t i = 0; i < len; i++) s += d[i]; return s; }
+uint32_t parity(const uint8_t *d, size_t len) {
+    uint32_t x = 0;
+    for (size_t i = 0; i < len; i++) x ^= d[i];
+    x ^= x >> 4; x ^= x >> 2; x ^= x >> 1;
+    return x & 1u;
+}
+int main(void) {
+    const uint8_t *m = (const uint8_t *)"123456789";
+    printf("%08X\n", crc32_ieee(m, 9));   /* CBF43926 */
+    printf("%04X\n", crc16_ccitt(m, 9));  /* 29B1 */
+    printf("%08X\n", crc_generic(m, 9, 32, 0x04C11DB7u, 0xFFFFFFFFu, 1, 1, 0xFFFFFFFFu)); /* CBF43926 */
+    printf("%X %u\n", sum32(m, 9), parity(m, 9)); /* 1DD 1 */
+    return 0;
+}
+@@@ S06
+【情境 S06：RV32I 反組譯器（32 位元指令→組語文字）】
+重點：先看 opcode[6:0]，再用 funct3/funct7 分；I 型 imm=inst[31:20] 有號；S/B/J 的 imm 是拆開的，照位置拼回再符號延伸（B 13 位、J 21 位，最低位補 0）。
+陷阱：最低 2 位≠11 是 16 位元壓縮指令（長度 2）；sub/srai 看 funct7=0x20，M 擴充看 funct7=1；分支印相對位移；sw 的 rs2 是要存的值。
+#include <stdio.h>
+#include <stdint.h>
+#define F(x,h,l) (((x)>>(l))&(0xFFFFFFFFu>>(31-((h)-(l)))))
+int32_t sx(uint32_t v,int w){uint32_t s=1u<<(w-1);v&=(s<<1)-1u;return (int32_t)((v^s)-s);}
+#define II(i) sx(F(i,31,20),12)
+#define IS(i) sx((F(i,31,25)<<5)|F(i,11,7),12)
+#define IB(i) sx((F(i,31,31)<<12)|(F(i,7,7)<<11)|(F(i,30,25)<<5)|(F(i,11,8)<<1),13)
+#define IJ(i) sx((F(i,31,31)<<20)|(F(i,19,12)<<12)|(F(i,20,20)<<11)|(F(i,30,21)<<1),21)
+int dis(uint32_t i,char*o){
+ if((i&3)!=3){sprintf(o,"16-bit compressed, len=2");return 2;}
+ uint32_t op=F(i,6,0),rd=F(i,11,7),f3=F(i,14,12),a=F(i,19,15),b=F(i,24,20),f7=F(i,31,25);
+ const char*B[8]={"beq","bne",0,0,"blt","bge","bltu","bgeu"},*L[8]={"lb","lh","lw",0,"lbu","lhu",0,0},
+  *S[8]={"sb","sh","sw",0,0,0,0,0},*OI[8]={"addi","slli","slti","sltiu","xori","srli","ori","andi"},
+  *R[8]={"add","sll","slt","sltu","xor","srl","or","and"},
+  *M[8]={"mul","mulh","mulhsu","mulhu","div","divu","rem","remu"},*n=0;
+ switch(op){
+ case 0x37:sprintf(o,"lui x%u,0x%x",rd,F(i,31,12));return 4;
+ case 0x17:sprintf(o,"auipc x%u,0x%x",rd,F(i,31,12));return 4;
+ case 0x6F:sprintf(o,"jal x%u,%d",rd,IJ(i));return 4;
+ case 0x67:sprintf(o,"jalr x%u,%d(x%u)",rd,II(i),a);return 4;
+ case 0x63:if((n=B[f3])){sprintf(o,"%s x%u,x%u,%d",n,a,b,IB(i));return 4;}break;
+ case 0x03:if((n=L[f3])){sprintf(o,"%s x%u,%d(x%u)",n,rd,II(i),a);return 4;}break;
+ case 0x23:if((n=S[f3])){sprintf(o,"%s x%u,%d(x%u)",n,b,IS(i),a);return 4;}break;
+ case 0x13:if(f3==1||f3==5){sprintf(o,"%s x%u,x%u,%u",f3==1?"slli":f7?"srai":"srli",rd,a,b);return 4;}
+  sprintf(o,"%s x%u,x%u,%d",OI[f3],rd,a,II(i));return 4;
+ case 0x33:n=f7==0?R[f3]:f7==1?M[f3]:(f7==32&&f3==0)?"sub":(f7==32&&f3==5)?"sra":0;
+  if(n){sprintf(o,"%s x%u,x%u,x%u",n,rd,a,b);return 4;}break;
+ case 0x73:if(i==0x73||i==0x100073){sprintf(o,"%s",i==0x73?"ecall":"ebreak");return 4;}break;
+ }
+ sprintf(o,"unknown 0x%08x",i);return 4;}
+int main(void){char s[64];
+ uint32_t t[]={0x00500093,0x00512423,0xfe000ee3,0x40B50533,0x123450b7,0xffdff06f,0x022081B3,0x0001};
+ for(int k=0;k<8;k++){dis(t[k],s);printf("%08x %s\n",t[k],s);}
+ return 0;}
+@@@ S07
+【情境 S07：RV32I 單條組譯器（欄位→32 位元機器碼）】
+重點：每種格式一個 enc 函式，欄位由高到低：R=f7|rs2|rs1|f3|rd|op，I=imm[11:0]|rs1|f3|rd|op，U=imm20|rd|op。opcode：OP 0x33、OP-IMM 0x13、LOAD 0x03、STORE 0x23、BRANCH 0x63、LUI 0x37、JAL 0x6F、JALR 0x67；sub/srai 的 f7=0x20，M 擴充 f7=1。
+陷阱：S 的 imm 拆 [11:5]/[4:0]；B 是 13 位 [12|10:5|4:1|11]、J 是 21 位 [20|10:1|11|19:12]，位移必須偶數；srai 的 imm 要填 0x400|shamt；sw 的 rs2 是要存的值；I 型 imm 範圍 -2048..2047。
+#include <stdio.h>
+#include <stdint.h>
+uint32_t enc_r(uint32_t f7, uint32_t rs2, uint32_t rs1, uint32_t f3, uint32_t rd, uint32_t op) {
+    return f7 << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 | rd << 7 | op;
+}
+uint32_t enc_i(int32_t imm, uint32_t rs1, uint32_t f3, uint32_t rd, uint32_t op) {
+    return ((uint32_t)imm & 0xFFF) << 20 | rs1 << 15 | f3 << 12 | rd << 7 | op;
+}
+uint32_t enc_s(int32_t imm, uint32_t rs2, uint32_t rs1, uint32_t f3, uint32_t op) {
+    uint32_t u = (uint32_t)imm;
+    return ((u >> 5) & 0x7F) << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 | (u & 31) << 7 | op;
+}
+uint32_t enc_b(int32_t imm, uint32_t rs2, uint32_t rs1, uint32_t f3, uint32_t op) {
+    uint32_t u = (uint32_t)imm;
+    return ((u >> 12) & 1) << 31 | ((u >> 5) & 0x3F) << 25 | rs2 << 20 | rs1 << 15 | f3 << 12
+         | ((u >> 1) & 0xF) << 8 | ((u >> 11) & 1) << 7 | op;
+}
+uint32_t enc_u(uint32_t imm20, uint32_t rd, uint32_t op) { return (imm20 & 0xFFFFF) << 12 | rd << 7 | op; }
+uint32_t enc_j(int32_t imm, uint32_t rd, uint32_t op) {
+    uint32_t u = (uint32_t)imm;
+    return ((u >> 20) & 1) << 31 | ((u >> 1) & 0x3FF) << 21 | ((u >> 11) & 1) << 20
+         | ((u >> 12) & 0xFF) << 12 | rd << 7 | op;
+}
+int main(void) {
+    printf("%08x\n", enc_i(5, 0, 0, 1, 0x13));          /* addi x1,x0,5    00500093 */
+    printf("%08x\n", enc_s(8, 5, 2, 2, 0x23));          /* sw x5,8(x2)     00512423 */
+    printf("%08x\n", enc_b(-4, 0, 0, 0, 0x63));         /* beq x0,x0,-4    fe000ee3 */
+    printf("%08x\n", enc_r(0x20, 11, 10, 0, 10, 0x33)); /* sub x10,x10,x11 40b50533 */
+    printf("%08x\n", enc_u(0x12345, 1, 0x37));          /* lui x1,0x12345  123450b7 */
+    printf("%08x\n", enc_j(-4, 0, 0x6F));               /* jal x0,-4       ffdff06f */
+    printf("%08x\n", enc_r(1, 2, 1, 0, 3, 0x33));       /* mul x3,x1,x2    022081b3 */
+    return 0;
+}
+@@@ S08
+【情境 S08：迷你 RV32I 模擬器（32 暫存器＋記憶體，跑指令陣列）】
+重點：迴圈 取指(pc)→解碼→執行→pc=next；x0 永遠 0（寫入前檢查 rd!=0）；分支/jal 目標＝pc+imm（不是 pc+4+imm）；blt 要轉 int32_t 比較。
+陷阱：jalr 先算目標再寫 rd（rd 可能等於 rs1），目標 &~1；記憶體小端；要有步數上限與非法指令報錯。本精簡版記憶體以 word 存，lw/sw 假設 4 對齊。
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#define F(x,h,l) (((x)>>(l))&(0xFFFFFFFFu>>(31-((h)-(l)))))
+int32_t sx(uint32_t v,int w){uint32_t s=1u<<(w-1);v&=(s<<1)-1u;return (int32_t)((v^s)-s);}
+uint32_t X[32],mem[1024];                 /* 4 KB */
+int run(const uint32_t*p,int n,int max){  /* 回傳步數，錯誤 -1 */
+ memset(X,0,sizeof X);memset(mem,0,sizeof mem);memcpy(mem,p,(size_t)n*4);
+ uint32_t pc=0;
+ for(int st=1;st<=max;st++){
+  if(pc/4>=1024)return -1;
+  uint32_t i=mem[pc/4],op=F(i,6,0),rd=F(i,11,7),f3=F(i,14,12),a=X[F(i,19,15)],b=X[F(i,24,20)],nx=pc+4,v=0;
+  int32_t ii=sx(F(i,31,20),12),is=sx((F(i,31,25)<<5)|F(i,11,7),12);
+  int32_t ib=sx((F(i,31,31)<<12)|(F(i,7,7)<<11)|(F(i,30,25)<<5)|(F(i,11,8)<<1),13);
+  int32_t ij=sx((F(i,31,31)<<20)|(F(i,19,12)<<12)|(F(i,20,20)<<11)|(F(i,30,21)<<1),21);
+  int wr=1;
+  switch(op){
+  case 0x13:v=a+(uint32_t)ii;break;                       /* addi */
+  case 0x33:v=F(i,31,25)==0x20?a-b:a+b;break;             /* add/sub */
+  case 0x37:v=i&0xFFFFF000u;break;                        /* lui */
+  case 0x03:v=mem[((a+(uint32_t)ii)/4)%1024];break;       /* lw */
+  case 0x23:mem[((a+(uint32_t)is)/4)%1024]=b;wr=0;break;  /* sw */
+  case 0x63:wr=0;                                         /* beq bne blt */
+   if((f3==0&&a==b)||(f3==1&&a!=b)||(f3==4&&(int32_t)a<(int32_t)b))nx=pc+(uint32_t)ib;
+   break;
+  case 0x6F:v=pc+4;nx=pc+(uint32_t)ij;break;              /* jal */
+  case 0x67:v=pc+4;nx=(a+(uint32_t)ii)&~1u;break;         /* jalr */
+  case 0x73:return st;                                    /* ecall 停機 */
+  default:printf("illegal %08x at %x\n",i,pc);return -1;
+  }
+  if(wr&&rd)X[rd]=v;
+  pc=nx;
+ }
+ return -1;}
+int main(void){ /* 1 加到 10：x1=sum x2=i x3=11 */
+ uint32_t p[]={0x00000093,0x00100113,0x00b00193,0x002080b3,0x00110113,
+               0xfe311ce3,0x10102023,0x10002203,0x00000073};
+ int s=run(p,9,10000);
+ printf("steps=%d x1=%u x4=%u\n",s,X[1],X[4]);   /* steps=36 x1=55 x4=55 */
+ return 0;}
+@@@ S09
+【情境 S09：PIO 指令組譯器＋反組譯器（C）】
+格式：16 位元＝種類[15:13]｜delay/side-set[12:8]｜mid[7:5]｜low[4:0]；位元數 1～32，32 編成 0。
+陷阱：PUSH/PULL 共用 100，bit7=0 push、1 pull，bits4:0 必須 0（bit4=1 變 mov rxfifo）；pioasm 預設 block → push=0x8020 不是 0x8000。
+side-set 佔 [12:8] 高位：.side_set n → delay 只剩 5-n 位；opt 再吃 1 位（bit12=enable）。JMP 位址相對程式開頭，SDK 載入自動加 offset。
+驗算：out x,32=6020 in x,32=4020 push=8020 pull=80a0 nop(mov y,y)=a042 jmp x-- 3=0043 set pindirs,1=e081 set pins,1 [1]=e101 wait 1 gpio 3=2083 mov x,osr=a027 in null,24=4078
+#include <stdint.h>
+#include <stdio.h>
+#define PK(op,ds,mid,low) ((uint16_t)(((op)<<13)|(((ds)&31)<<8)|(((mid)&7)<<5)|((low)&31)))
+/* ds 欄位：ss=side-set 位數, opt=0/1, side<0 表示沒寫 */
+static unsigned DS(int ss,int opt,int side,int delay){
+  int db=5-ss-opt; unsigned f=(unsigned)delay;
+  if(side>=0){ f|=(unsigned)side<<db; if(opt) f|=16; } return f; }
+/* JMP cond:0無 1!x 2x-- 3!y 4y-- 5x!=y 6pin 7!osre
+   IN src:0pins 1x 2y 3null 6isr 7osr | OUT dst:0pins 1x 2y 3null 4pindirs 5pc 6isr 7exec
+   MOV dst:0pins 1x 2y 3pindirs 4exec 5pc 6isr 7osr | MOV src:0pins 1x 2y 3null 5status 6isr 7osr | op 1=~ 2=::
+   SET dst:0pins 1x 2y 4pindirs | WAIT src:0gpio 1pin 2irq 3jmppin */
+#define JMP(c,a)      PK(0,0,c,a)
+#define WAIT(p,s,i)   PK(1,0,((p)<<2)|(s),i)
+#define IN(s,n)       PK(2,0,s,n)
+#define OUT(d,n)      PK(3,0,d,n)
+#define PUSH(iff,blk) PK(4,0,((iff)<<1)|(blk),0)
+#define PULL(ife,blk) PK(4,0,4|((ife)<<1)|(blk),0)
+#define MOV(d,op,s)   PK(5,0,d,((op)<<3)|(s))
+#define IRQ(clr,w,i)  PK(6,0,((clr)<<1)|(w),i)
+#define SET(d,v)      PK(7,0,d,v)
+static const char *JC[8]={"","!x ","x-- ","!y ","y-- ","x!=y ","pin ","!osre "};
+static const char *IO[8]={"pins","x","y","null","pindirs","pc","isr","exec"};
+void dis(uint16_t w,int ss,int opt){          /* 反組譯核心 */
+  unsigned op=w>>13,f=(w>>8)&31,mid=(w>>5)&7,low=w&31,n=low?low:32;
+  int db=5-ss-opt;
+  switch(op){
+  case 0: printf("jmp %s%u",JC[mid],low); break;
+  case 2: printf("in %s, %u",IO[mid],n); break;     /* src 4,5 保留 */
+  case 3: printf("out %s, %u",IO[mid],n); break;
+  case 4: fputs(mid&4?"pull":"push",stdout); break;       /* bit6 if, bit5 block */
+  case 7: printf("set %s, %u",IO[mid],low); break;
+  default: printf("op%u mid%u low%u",op,mid,low);
+  }
+  if(f&((1u<<db)-1)) printf(" [%u]",f&((1u<<db)-1));
+  printf("\n");
+}
+@@@ S10
+【情境 S10：PIO 狀態機 PC 模擬器（C）】
+規則：OSR 計數重設=32(空)、ISR=0；autopull：OUT 前計數≥門檻就從 TX 補，TX 空就 stall；autopush：IN 後計數≥門檻就推 RX，RX 滿 stall；門檻 0 代表 32。
+移位：OUT 右移取低 n 位（先出 LSB）、左移取高 n 位；IN 永遠取來源低 n 位，右移從 MSB 端塞、左移從 LSB 端塞（右移收 8 bit → 位元組在 31:24，要 in null,24 或 >>24）。
+JMP x--：原值≠0 才跳、一定遞減；PC：跳躍→目標，否則 PC==wrap→wrap_target，否則 +1；delay 在指令完成後才數。陷阱：echo 同時開 autopush 會多推一個 0。
+#include <stdint.h>
+typedef struct{ uint16_t ins[32]; int pc,wt,wr, oright,ap,pth, iright,apu,uth;
+ uint32_t x,y,osr,isr,pins; int oc,ic; uint32_t tx[4],rx[4]; int tn,tr,rn,rr; } SM;
+static int T(int t){return t?t:32;}
+static uint32_t M(int n){return n>=32?~0u:(1u<<n)-1;}
+/* 回傳 1=stall */
+int step(SM*s){
+ uint16_t w=s->ins[s->pc]; unsigned op=w>>13,mid=(w>>5)&7,low=w&31; int n=low?low:32, j=-1;
+ if(op==3){ /* OUT */
+  if(s->ap&&s->oc>=T(s->pth)){ if(!s->tn) return 1; s->osr=s->tx[s->tr]; s->tr=(s->tr+1)&3; s->tn--; s->oc=0; }
+  uint32_t d;
+  if(s->oright){ d=s->osr&M(n); s->osr=n==32?0:s->osr>>n; }
+  else { d=n==32?s->osr:s->osr>>(32-n); s->osr=n==32?0:s->osr<<n; }
+  s->oc=s->oc+n>32?32:s->oc+n;
+  if(mid==1)s->x=d; else if(mid==2)s->y=d; else if(mid==5)j=d&31;
+ } else if(op==2){ /* IN */
+  uint32_t d= mid==0?s->pins: mid==1?s->x: mid==2?s->y: mid==7?s->osr: mid==6?s->isr:0; d&=M(n);
+  if(n==32) s->isr=d; else if(s->iright) s->isr=(s->isr>>n)|(d<<(32-n)); else s->isr=(s->isr<<n)|d;
+  s->ic=s->ic+n>32?32:s->ic+n;
+  if(s->apu&&s->ic>=T(s->uth)){ if(s->rn==4) return 1; s->rx[(s->rr+s->rn++)&3]=s->isr; s->isr=0; s->ic=0; }
+ } else if(op==4&&!(mid&4)){ /* PUSH block */
+  if(s->rn==4) return 1;
+  s->rx[(s->rr+s->rn++)&3]=s->isr; s->isr=0; s->ic=0;
+ } else if(op==0){ /* JMP */
+  int t= mid==0 || (mid==1&&!s->x) || (mid==3&&!s->y) || (mid==5&&s->x!=s->y) || (mid==7&&s->oc<T(s->pth));
+  if(mid==2){ t=s->x!=0; s->x--; } if(mid==4){ t=s->y!=0; s->y--; }
+  if(t) j=low;
+ } else if(op==7){ if(mid==1)s->x=low; else if(mid==2)s->y=low; }
+ s->pc = j>=0? j : s->pc==s->wr? s->wt : (s->pc+1)&31;
+ return 0;
+}
+完整版（WAIT/PULL/MOV/IRQ/side-set/delay/pin callback）在 Notion「直接可用的程式碼」。
+@@@ S11
+【情境 S11：Pico SDK PIO C 端樣板（echo＋8 位元位元流 autopush）】
+五步：pio_add_program → pio_claim_unused_sm → 設定 config → pio_sm_init → pio_sm_set_enabled（init 後 SM 仍停用）。回傳值用 int 接，<0 失敗。
+手組指令沒 pioasm 時：pio_get_default_sm_config 的 wrap 是 0→31，一定要 sm_config_set_wrap(&c, off+wt, off+wr)；JMP 位址寫相對值，SDK 自動加 off。
+shift：sm_config_set_in_shift(&c, shift_right, autopush, 門檻)；MSB 先用左移(false)→低 8 位就是位元組；LSB 先用右移→位元組在 31:24 要 >>24。echo 只開 autopull，別開 autopush。
+未實測（無開發板）；PIO 程式本體已在 PC 模擬器驗證。
+#include "pico/stdlib.h"
+#include "hardware/pio.h"
+static const uint16_t echo_i[]={0x6020,0x4020,0x8020};      /* out x,32 / in x,32 / push */
+static const uint16_t bs8_i[] ={0x2021,0x20a1,0x4001};      /* wait 0 pin 1 / wait 1 pin 1 / in pins,1 */
+static const pio_program_t echo_p={.instructions=echo_i,.length=3,.origin=-1};
+static const pio_program_t bs8_p ={.instructions=bs8_i,.length=3,.origin=-1};
+#define DATA_PIN 2   /* CLK = DATA_PIN+1 */
+int main(void){
+  stdio_init_all(); PIO pio=pio0;
+  int off=pio_add_program(pio,&echo_p); int sm=pio_claim_unused_sm(pio,false);
+  if(off<0||sm<0) return 1;
+  pio_sm_config c=pio_get_default_sm_config();
+  sm_config_set_wrap(&c,(uint)off,(uint)off+2);
+  sm_config_set_out_shift(&c,false,true,32);   /* autopull 32 */
+  sm_config_set_in_shift(&c,false,false,32);   /* 自己 push */
+  pio_sm_init(pio,(uint)sm,(uint)off,&c); pio_sm_set_enabled(pio,(uint)sm,true);
+  pio_sm_put_blocking(pio,(uint)sm,0x12345678);
+  uint32_t r=pio_sm_get_blocking(pio,(uint)sm);       /* == 0x12345678 */
+
+  int off2=pio_add_program(pio,&bs8_p); int sm2=pio_claim_unused_sm(pio,false);
+  pio_gpio_init(pio,DATA_PIN); pio_gpio_init(pio,DATA_PIN+1);
+  pio_sm_set_consecutive_pindirs(pio,(uint)sm2,DATA_PIN,2,false);
+  pio_sm_config c2=pio_get_default_sm_config();
+  sm_config_set_wrap(&c2,(uint)off2,(uint)off2+2);
+  sm_config_set_in_pins(&c2,DATA_PIN);                /* wait pin 1 = CLK */
+  sm_config_set_in_shift(&c2,false,true,8);           /* MSB 先、autopush 8 */
+  pio_sm_init(pio,(uint)sm2,(uint)off2,&c2); pio_sm_set_enabled(pio,(uint)sm2,true);
+  while(1){ uint8_t b=(uint8_t)(pio_sm_get_blocking(pio,(uint)sm2)&0xff); printf("%02x\n",b); }
+}
+@@@ S12
+【情境 S12：Pico SDK DMA 樣板（複製、填值、sniffer、PIO 餵資料）】
+dma_channel_configure(ch,&c,寫位址,讀位址,筆數,trigger)：寫在前；筆數=byte÷(1/2/4)；預設讀遞增、寫不遞增（複製要開寫遞增）。
+填值＝讀不遞增；餵 PIO＝讀遞增、寫 &pio->txf[sm] 不遞增、dreq=pio_get_dreq(pio,sm,true)；收 PIO＝讀 &pio->rxf[sm]、寫遞增、dreq(...,false)。
+sniffer 順序：config 開 sniff_enable → configure(trigger=false) → dma_sniffer_enable(ch,mode,true) → 設種子 → start → wait → 讀。mode 0 CRC32 1 CRC32R 2 CRC16 3 CRC16R e EVEN f SUM。
+未實測（無開發板）。SDK<2.2 沒有 dma_encode_transfer_count，直接傳筆數。
+#include "pico/stdlib.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
+#define N 64
+static uint32_t src[N], dst[N], fillv=0xA5A5A5A5u, sink;
+static int run(volatile void *w,const volatile void *r,uint32_t cnt,enum dma_channel_transfer_size sz,
+               bool rinc,bool winc,int dreq){
+  int ch=dma_claim_unused_channel(false); if(ch<0) return -1;   /* 失敗 -1 */
+  dma_channel_config c=dma_channel_get_default_config((uint)ch);
+  channel_config_set_transfer_data_size(&c,sz);
+  channel_config_set_read_increment(&c,rinc);
+  channel_config_set_write_increment(&c,winc);
+  if(dreq>=0) channel_config_set_dreq(&c,(uint)dreq);
+  dma_channel_configure((uint)ch,&c,w,r,cnt,true);
+  while(dma_channel_is_busy((uint)ch)){ /* 非阻塞：做別的事 */ }
+  dma_channel_wait_for_finish_blocking((uint)ch);
+  dma_channel_cleanup((uint)ch); dma_channel_unclaim((uint)ch); return 0;
+}
+static uint32_t sum32(const uint32_t *buf,uint32_t cnt){
+  int ch=dma_claim_unused_channel(true);
+  dma_channel_config c=dma_channel_get_default_config((uint)ch);
+  channel_config_set_read_increment(&c,true); channel_config_set_write_increment(&c,false);
+  channel_config_set_sniff_enable(&c,true);
+  dma_channel_configure((uint)ch,&c,&sink,buf,cnt,false);
+  dma_sniffer_enable((uint)ch,0xf,true);
+  dma_sniffer_set_data_accumulator(0);
+  dma_channel_start((uint)ch); dma_channel_wait_for_finish_blocking((uint)ch);
+  uint32_t r=dma_sniffer_get_data_accumulator();
+  dma_sniffer_disable(); dma_channel_cleanup((uint)ch); dma_channel_unclaim((uint)ch); return r;
+}
+int main(void){
+  stdio_init_all(); for(int i=0;i<N;i++) src[i]=i;
+  run(dst,src,N,DMA_SIZE_32,true,true,-1);           /* 複製 */
+  run(dst,&fillv,N,DMA_SIZE_32,false,true,-1);       /* 填值 */
+  printf("sum=%lu\n",(unsigned long)sum32(src,N));   /* 2016 */
+  /* PIO TX 餵資料（pio/sm 已啟動 echo）：
+     run(&pio->txf[sm],src,N,DMA_SIZE_32,true,false,pio_get_dreq(pio,sm,true));
+     另開通道收：讀 &pio->rxf[sm]、寫 dst 遞增、dreq(pio,sm,false)，兩個要同時開 */
+}
+@@@ S13
+【情境 S13：用演練 transfer engine API 完成搬運工作（PC 可跑）】
+API（engine.h，只有 4 通道）：int engine_claim(void) 全滿回 -1；void engine_configure(int ch,const engine_job_t*)；engine_start/engine_busy/engine_wait/engine_release(int ch)。
+engine_job_t{const void*src; void*dst; size_t count(筆數非 byte); xfer_size_t size(XFER_8/16/32=1/2/4); bool src_increment,dst_increment;}
+規則：count=0、size 錯、位址沒對齊 size、busy 時 configure/release → engine 直接 exit。一定先 engine_wait 再 release。填值＝src_increment=false。
+第五個請求：claim 回 -1 → 找自己持有且 !busy 的通道 wait+release 後重試；或不 release，同一通道 wait 完再 configure 下一個。
+#include "engine.h"
+#include <sched.h>
+#include <stdint.h>
+static xfer_size_t best(const void*s,const void*d,size_t nb){
+  uintptr_t a=(uintptr_t)s|(uintptr_t)d|nb; return a%4==0?XFER_32:a%2==0?XFER_16:XFER_8; }
+int copy_bytes(void*d,const void*s,size_t nb){
+  int ch=engine_claim(); if(ch<0) return -1;
+  xfer_size_t z=best(s,d,nb);
+  engine_job_t j={s,d,nb/(size_t)z,z,true,true};
+  engine_configure(ch,&j); engine_start(ch); engine_wait(ch); engine_release(ch); return 0; }
+typedef enum{PEND,RUN,DONE} st_t;
+typedef struct{ engine_job_t job; int ch; st_t st; } task_t;
+void run_tasks(task_t*t,int n){          /* N 個工作排 4 個通道 */
+  int done=0;
+  while(done<n){
+    for(int i=0;i<n;i++){ if(t[i].st!=PEND) continue;
+      int ch=engine_claim(); if(ch<0) break;          /* 沒通道：下一輪再派 */
+      engine_configure(ch,&t[i].job); engine_start(ch); t[i].ch=ch; t[i].st=RUN; }
+    for(int i=0;i<n;i++) if(t[i].st==RUN && !engine_busy(t[i].ch)){
+      engine_wait(t[i].ch); engine_release(t[i].ch); t[i].st=DONE; done++; }
+    sched_yield();                                     /* 這裡可做別的事 */
+  }
+}
+/* 非阻塞：engine_start(ch); while(engine_busy(ch)){ 做別的事; } engine_wait(ch); */
+編譯：gcc -O2 -Wall -Wextra -pthread main.c engine.c
+@@@ S14
+【情境 S14：PIO＋DMA 位元流題解題流程】
+流程：①畫時序（誰是時脈、何時取樣、先 MSB 或 LSB、每框幾 bit）→②寫 PIO（wait/in/jmp，≤32 條）→③C 端設定 in_pins、in_shift(方向,autopush,門檻)、jmp_pin、wrap→④讀 RX（CPU get_blocking 或 DMA：讀 &pio->rxf[sm] 不遞增、寫遞增、dreq=pio_get_dreq(pio,sm,false)）→⑤C 端拆欄位。
+方向：MSB 先＋左移→值在低位；LSB 先＋右移→值在高位，要 in null,(32-n) 或 >>(32-n)。門檻＝每框 bit 數。
+陷阱：框與框之間的處理指令也吃週期，訊號太快會漏 bit；UART 要等 1.5 bit 取中點；stop bit 錯要清 ISR（mov isr, null）。
+; 題 A：CLK 上升緣取 DATA，16 bit 一框（in_base=DATA，CLK=in_base+1）
+.wrap_target
+    wait 0 pin 1
+    wait 1 pin 1
+    in pins, 1          ; in_shift(false, true, 16)
+.wrap
+; 題 B：UART 8N1，每 bit 8 週期（in_base=jmp_pin=RX，in_shift(true,false,32)）
+.wrap_target
+idle:
+    wait 0 pin 0        ; start bit
+    set x, 7 [10]       ; 12 週期 = 1.5 bit
+bit:
+    in pins, 1
+    jmp x-- bit [6]     ; 每 bit 8 週期
+    jmp pin ok          ; stop 應為 1
+    mov isr, null
+    wait 1 pin 0
+    jmp idle
+ok:
+    in null, 24         ; 位元組移到 7:0
+    push
+.wrap
+/* C 端（題 A）：拆欄位 [15:12]=type、[11:0]=value */
+pio_sm_config c = pio_get_default_sm_config();
+sm_config_set_wrap(&c, off, off + 2);
+sm_config_set_in_pins(&c, DATA_PIN);
+sm_config_set_in_shift(&c, false, true, 16);
+pio_sm_init(pio, sm, off, &c); pio_sm_set_enabled(pio, sm, true);
+uint32_t w = pio_sm_get_blocking(pio, sm);
+unsigned type = (w >> 12) & 0xF, value = w & 0xFFF;
+/* 題 B 另加 sm_config_set_jmp_pin(&c, RX_PIN); 位元組 = get & 0xff；時脈除頻讓 8 週期 = 1 bit：
+   sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / (8 * baud)); */
+@@@ S15
+【情境 S15：多執行緒正確加總（不上鎖／mutex／spinlock／atomic／區域累加）】
+- sum += x 是「讀、加、寫」三步，多執行緒不保護會掉數字（lost update），每次結果都不同。
+- 正確寫法：mutex、spinlock、atomic_fetch_add；最快：每個執行緒先加到自己的 local，最後只鎖一次合併。
+- 實測（4 執行緒、400 萬筆）：不上鎖 4.5ms 但答案錯；mutex 93ms；spinlock 354ms；atomic 26ms；local+merge 0.5ms。
+- spinlock 只適合極短臨界區，搶得兇時比 mutex 慢；編譯要加 -pthread。
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdio.h>
+#define N 4000000L
+#define T 4
+static int a[N];
+static long sum_mutex, sum_spin, sum_local;
+static atomic_long sum_atomic;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_spinlock_t spin;
+typedef struct { int id, mode; } arg_t;
+static void *worker(void *p) {
+    arg_t *g = p;
+    long lo = N * g->id / T, hi = N * (g->id + 1) / T;   /* 第 id 塊 */
+    if (g->mode == 2) for (long i = lo; i < hi; i++) { pthread_mutex_lock(&mtx); sum_mutex += a[i]; pthread_mutex_unlock(&mtx); }
+    if (g->mode == 3) for (long i = lo; i < hi; i++) { pthread_spin_lock(&spin); sum_spin += a[i]; pthread_spin_unlock(&spin); }
+    if (g->mode == 4) for (long i = lo; i < hi; i++) atomic_fetch_add_explicit(&sum_atomic, a[i], memory_order_relaxed);
+    if (g->mode == 5) { long local = 0;
+        for (long i = lo; i < hi; i++) local += a[i];
+        pthread_mutex_lock(&mtx); sum_local += local; pthread_mutex_unlock(&mtx); }
+    return NULL;
+}
+static void run(int mode) {
+    pthread_t th[T]; arg_t g[T];
+    for (int i = 0; i < T; i++) { g[i].id = i; g[i].mode = mode; pthread_create(&th[i], NULL, worker, &g[i]); }
+    for (int i = 0; i < T; i++) pthread_join(th[i], NULL);
+}
+int main(void) {
+    pthread_spin_init(&spin, PTHREAD_PROCESS_PRIVATE);
+    long expect = 0;
+    for (long i = 0; i < N; i++) { a[i] = (int)(i % 100); expect += a[i]; }
+    for (int m = 2; m <= 5; m++) run(m);
+    int ok = sum_mutex == expect && sum_spin == expect && atomic_load(&sum_atomic) == expect && sum_local == expect;
+    printf("%ld %ld %ld %ld %ld\n%s\n", expect, sum_mutex, sum_spin, (long)atomic_load(&sum_atomic), sum_local, ok ? "ALL OK" : "FAIL");
+    return !ok;
+}
+
+@@@ S16
+【情境 S16：平行化迴圈（切塊給 N 個 pthread，各自算再合併）＋ false sharing】
+- 第 id 塊範圍：lo = N*id/nt，hi = N*(id+1)/nt（餘數自動給最後一塊）。各自用區域變數累加，最後寫一次 partial，主程式 join 後相加。
+- 實測 24 核心：1/2/4/8 執行緒 68/34/18/13 ms，加速 1/2.0/3.8/5.1 倍；taskset -c 0 限一核時全部約 66ms（沒加速）。
+- false sharing：4 個執行緒各寫自己的 long，但擠在同一條 64B cache line → 145ms；用 _Alignas(64) 隔開 → 11ms（快 13.7 倍）。
+- 浮點數加總換切法順序會有微小誤差；要精確比對就用整數。
+
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#define N (1L << 23)
+#define MAXT 8
+static uint64_t a[N];
+static inline uint64_t work(uint64_t x) {
+    for (int k = 0; k < 16; k++) { x = x * 6364136223846793005ULL + 1442695040888963407ULL; x ^= x >> 29; }
+    return x;
+}
+typedef struct { int id, nt; uint64_t partial; } job_t;
+static void *worker(void *p) {
+    job_t *j = p;
+    long lo = N * j->id / j->nt, hi = N * (j->id + 1) / j->nt;
+    uint64_t s = 0;                         /* 區域變數，不要直接累加到 j->partial */
+    for (long i = lo; i < hi; i++) s += work(a[i]);
+    j->partial = s;
+    return NULL;
+}
+static uint64_t par_sum(int nt) {
+    pthread_t th[MAXT]; job_t jb[MAXT];
+    for (int i = 0; i < nt; i++) { jb[i].id = i; jb[i].nt = nt; pthread_create(&th[i], NULL, worker, &jb[i]); }
+    uint64_t s = 0;
+    for (int i = 0; i < nt; i++) { pthread_join(th[i], NULL); s += jb[i].partial; }
+    return s;
+}
+/* false sharing 對照 */
+typedef struct { volatile long v; } packed_t;               /* 擠在同一條 cache line */
+typedef struct { _Alignas(64) volatile long v; } padded_t;  /* 一個占一條 */
+int main(void) {
+    for (long i = 0; i < N; i++) a[i] = (uint64_t)i * 2654435761u;
+    uint64_t ref = par_sum(1);
+    int ok = 1, ts[] = {2, 4, 8};
+    for (int k = 0; k < 3; k++) if (par_sum(ts[k]) != ref) ok = 0;
+    printf("sizeof %zu %zu\n%s\n", sizeof(packed_t), sizeof(padded_t), ok ? "ALL OK" : "FAIL");
+    return !ok;
+}
+/* 計時：在 par_sum 前後用 clock_gettime(CLOCK_MONOTONIC) 量（見 S19） */
+
+@@@ S17
+【情境 S17：有限資源池（semaphore 初值 4 管 4 個通道，10 個工作排隊）】
+- sem_wait：沒空位就睡著排隊（第五個請求會等到有人 release）；sem_trywait：拿不到回 -1、errno==EAGAIN，可先做別的事再試。
+- semaphore 只管「還剩幾個」，「哪一個通道空著」要另外用 mutex 保護的 in_use[] 找。
+- 歸還順序：先把 in_use[ch]=0，再 sem_post；每條路徑（含錯誤）都要 release，否則通道永遠少一個。
+- 實測：10 個工作同時最多 4 個在用（max_busy=4），結束後 sem 值回到 4。
+
+#include <errno.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <unistd.h>
+#define CHANNELS 4
+#define JOBS 10
+static sem_t free_ch;
+static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+static int in_use[CHANNELS];
+static int claim(void) {                 /* 呼叫前已拿到 sem，一定找得到 */
+    pthread_mutex_lock(&mtx);
+    int ch = -1;
+    for (int i = 0; i < CHANNELS; i++) if (!in_use[i]) { in_use[i] = 1; ch = i; break; }
+    pthread_mutex_unlock(&mtx);
+    return ch;
+}
+static void release(int ch) {
+    pthread_mutex_lock(&mtx); in_use[ch] = 0; pthread_mutex_unlock(&mtx);
+    sem_post(&free_ch);
+}
+static void *job_blocking(void *p) {     /* 版本 A：排隊等 */
+    int id = (int)(long)p;
+    sem_wait(&free_ch);
+    int ch = claim();
+    printf("job %d got ch %d\n", id, ch);
+    usleep(20000);                       /* 使用通道 */
+    release(ch);
+    return NULL;
+}
+static void *job_try(void *p) {          /* 版本 B：拿不到先做別的 */
+    int id = (int)(long)p; long other = 0;
+    while (sem_trywait(&free_ch) != 0) {
+        if (errno != EAGAIN) return NULL;
+        other++; usleep(1000);           /* 做別的事 */
+    }
+    int ch = claim();
+    printf("job %d got ch %d after %ld other tasks\n", id, ch, other);
+    usleep(20000);
+    release(ch);
+    return NULL;
+}
+int main(void) {
+    pthread_t th[JOBS];
+    sem_init(&free_ch, 0, CHANNELS);     /* 0=執行緒間共用，初值=通道數 */
+    for (long i = 0; i < JOBS; i++) pthread_create(&th[i], NULL, job_blocking, (void *)i);
+    for (int i = 0; i < JOBS; i++) pthread_join(th[i], NULL);
+    for (long i = 0; i < JOBS; i++) pthread_create(&th[i], NULL, job_try, (void *)i);
+    for (int i = 0; i < JOBS; i++) pthread_join(th[i], NULL);
+    int v; sem_getvalue(&free_ch, &v);
+    puts(v == CHANNELS ? "ALL OK" : "FAIL");
+    sem_destroy(&free_ch);
+    return v != CHANNELS;
+}
+
+@@@ S18
+【情境 S18：生產者－消費者（環形佇列＋mutex＋condition variable）】
+- 等待一定寫 while (條件不成立) pthread_cond_wait(&cv, &m);（會被假喚醒、或被別人搶先拿走）。
+- 放：滿了等 not_full，放完 signal not_empty；取：空了等 not_empty，取完 signal not_full。
+- 結束訊號：生產者全部 join 後設 done=1 並 broadcast not_empty；消費者在「done 且空」時回 0 下班。漏了就永遠卡住。
+- 實測：2 生產者×10 萬筆、3 消費者、容量 8，產出與消費的筆數與總和完全相同。
+
+#include <pthread.h>
+#include <stdio.h>
+#define CAP 8
+#define NP 2
+#define NC 3
+#define PER 100000
+static int buf[CAP], head, tail, count, done;
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t not_empty = PTHREAD_COND_INITIALIZER, not_full = PTHREAD_COND_INITIALIZER;
+static void put(int v) {
+    pthread_mutex_lock(&m);
+    while (count == CAP) pthread_cond_wait(&not_full, &m);
+    buf[tail] = v; tail = (tail + 1) % CAP; count++;
+    pthread_cond_signal(&not_empty);
+    pthread_mutex_unlock(&m);
+}
+static int get(int *v) {                      /* 1=拿到，0=結束 */
+    pthread_mutex_lock(&m);
+    while (count == 0 && !done) pthread_cond_wait(&not_empty, &m);
+    if (count == 0) { pthread_mutex_unlock(&m); return 0; }
+    *v = buf[head]; head = (head + 1) % CAP; count--;
+    pthread_cond_signal(&not_full);
+    pthread_mutex_unlock(&m);
+    return 1;
+}
+static long psum[NP], csum[NC];
+static void *producer(void *p) {
+    long id = (long)p;
+    for (int i = 1; i <= PER; i++) { int v = (int)id * PER + i; put(v); psum[id] += v; }
+    return NULL;
+}
+static void *consumer(void *p) {
+    long id = (long)p; int v;
+    while (get(&v)) csum[id] += v;
+    return NULL;
+}
+int main(void) {
+    pthread_t pt[NP], ct[NC];
+    for (long i = 0; i < NC; i++) pthread_create(&ct[i], NULL, consumer, (void *)i);
+    for (long i = 0; i < NP; i++) pthread_create(&pt[i], NULL, producer, (void *)i);
+    for (int i = 0; i < NP; i++) pthread_join(pt[i], NULL);
+    pthread_mutex_lock(&m); done = 1; pthread_cond_broadcast(&not_empty); pthread_mutex_unlock(&m);
+    for (int i = 0; i < NC; i++) pthread_join(ct[i], NULL);
+    long a = 0, b = 0;
+    for (int i = 0; i < NP; i++) a += psum[i];
+    for (int i = 0; i < NC; i++) b += csum[i];
+    printf("%ld %ld\n%s\n", a, b, a == b ? "ALL OK" : "FAIL");
+    return a != b;
+}
+
+@@@ S19
+【情境 S19：計時與比較框架（CLOCK_MONOTONIC、重複取最小值／中位數、加速比）】
+- 量經過時間用 clock_gettime(CLOCK_MONOTONIC)，不要用 time(NULL)（只有秒）或 clock()（CPU 時間，多執行緒會灌水）。
+- 同一段跑多次（例如 9 次）取最小值或中位數；每次前要重設輸入；兩版答案要相同才算優化。
+- 實測：迴圈條件裡每圈 strlen（O(n^2)）1.62ms vs 長度提到外面 0.009ms，快約 170 倍。
+- 整支程式：time ./a（看 real）；nproc 看核心數；taskset -c 0 ./a 限定只用 CPU 0。
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+static double now_ms(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+static int cmp_d(const void *x, const void *y) {
+    double a = *(const double *)x, b = *(const double *)y; return (a > b) - (a < b);
+}
+typedef struct { double min, med; } stat_t;
+static stat_t stats(double *t, int r) {
+    qsort(t, r, sizeof t[0], cmp_d);
+    stat_t s = { t[0], (r % 2) ? t[r / 2] : (t[r / 2 - 1] + t[r / 2]) / 2 }; return s;
+}
+#define BENCH(st, R, SETUP, CODE) do { double _t[R];                 \
+    for (int _r = 0; _r < (R); _r++) { SETUP; double _t0 = now_ms(); \
+        CODE; _t[_r] = now_ms() - _t0; }                             \
+    st = stats(_t, (R)); } while (0)
+
+#define LEN 20000
+static char orig[LEN + 1], s1[LEN + 1], s2[LEN + 1];
+static void v1(char *s) { for (size_t i = 0; i < strlen(s); i++) if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32; }
+static void v2(char *s) { size_t n = strlen(s); for (size_t i = 0; i < n; i++) if (s[i] >= 'a' && s[i] <= 'z') s[i] -= 32; }
+int main(void) {
+    for (int i = 0; i < LEN; i++) orig[i] = (char)('a' + rand() % 26);
+    stat_t a, b;
+    BENCH(a, 9, memcpy(s1, orig, sizeof orig), v1(s1));
+    BENCH(b, 9, memcpy(s2, orig, sizeof orig), v2(s2));
+    printf("v1 min %.3f med %.3f ms\nv2 min %.3f med %.3f ms\nspeedup %.1fx\n", a.min, a.med, b.min, b.med, a.min / b.min);
+    int ok = strcmp(s1, s2) == 0;
+    puts(ok ? "ALL OK" : "FAIL");
+    return !ok;
+}
+
+@@@ S20
+【情境 S20：快速 I/O（fread 緩衝解析讀整數、大 buffer 一次 fwrite 輸出）】
+- 實測讀 10^6 個整數：scanf 47ms、fread+自己解析 18ms、getchar_unlocked 11ms；輸出 printf 41ms、buffer+fwrite 22ms。
+- 自己解析要處理負號、跳過空白換行、EOF；值可能超過 int 就用 long long。
+- 輸出 buffer 快滿就先 fwrite，程式結束前一定要 flush_out()，否則尾巴會不見。不要和 printf 混用（順序會亂）。
+
+#include <stdio.h>
+static char ibuf[1 << 16]; static size_t ipos, ilen;
+static int rd(void) {
+    if (ipos == ilen) { ilen = fread(ibuf, 1, sizeof ibuf, stdin); ipos = 0; if (ilen == 0) return -1; }
+    return (unsigned char)ibuf[ipos++];
+}
+static int read_ll(long long *out) {            /* 成功 1，EOF 0 */
+    int c = rd();
+    while (c != -1 && c != '-' && (c < '0' || c > '9')) c = rd();
+    if (c == -1) return 0;
+    int neg = 0; if (c == '-') { neg = 1; c = rd(); }
+    long long x = 0;
+    while (c >= '0' && c <= '9') { x = x * 10 + (c - '0'); c = rd(); }
+    *out = neg ? -x : x; return 1;
+}
+static char obuf[1 << 16]; static size_t opos;
+static void flush_out(void) { fwrite(obuf, 1, opos, stdout); opos = 0; }
+static void write_ll(long long x) {             /* 印 x 加換行 */
+    if (opos + 24 > sizeof obuf) flush_out();
+    if (x < 0) { obuf[opos++] = '-'; x = -x; }
+    char t[24]; int k = 0;
+    do { t[k++] = (char)('0' + x % 10); x /= 10; } while (x);
+    while (k) obuf[opos++] = t[--k];
+    obuf[opos++] = '\n';
+}
+int main(void) {                                /* 題目範例：讀 n 和 n 個數，每個乘 2 輸出 */
+    long long n, x;
+    if (!read_ll(&n)) return 0;
+    for (long long i = 0; i < n && read_ll(&x); i++) write_ll(x * 2);
+    flush_out();
+    return 0;
+}
+/* 產生測資：awk 'BEGIN{srand(1);n=1000000;print n;for(i=0;i<n;i++)print int(rand()*2000000000)-1000000000}' > in.txt
+   計時：time ./a < in.txt > out.txt */
+
+@@@ S21
+【情境 S21：常見優化手法對照（迴圈順序、分塊、查表、無分支、提出不變量、-O 等級）】
+- 實測 -O2（前→後）：col→row-major 21→0.8ms；轉置 32x32 分塊 106→86ms；popcount 逐位元 99ms→查表 5.6ms／__builtin 10.6ms（加 -march=native 變 0.6ms）；不變量提出迴圈 58→0.24ms。
+- 分支改無分支：-O0 快 4.5 倍，-O2/-O3 幾乎沒差（編譯器自己就改成無分支）。-O3 會自動交換迴圈順序，col-major 也變快。
+- 結論：先開 -O2，再量；一次只改一處，答案要和原版相同。
+
+/* 1 迴圈順序：內層走最後一個索引 */
+for (int i = 0; i < R; i++) for (int j = 0; j < R; j++) s += M[i][j];
+
+/* 2 轉置分塊 BS=32 */
+for (int ii = 0; ii < TN; ii += BS) for (int jj = 0; jj < TN; jj += BS)
+    for (int i = ii; i < ii + BS; i++) for (int j = jj; j < jj + BS; j++) D[j][i] = S[i][j];
+
+/* 3 popcount 查表（先建表）與內建 */
+static uint8_t TBL[256];
+for (int i = 0; i < 256; i++) TBL[i] = (uint8_t)((i & 1) + TBL[i / 2]);
+c += TBL[v & 255] + TBL[(v >> 8) & 255] + TBL[(v >> 16) & 255] + TBL[v >> 24];
+c += __builtin_popcount(v);
+
+/* 4 無分支：條件成立 mask = 全 1，否則 0 */
+for (int i = 0; i < n; i++) s += a[i] & -(long)(a[i] >= 128);   /* 原本 if (a[i] >= 128) s += a[i]; */
+
+/* 5 不變量提出迴圈 */
+long sc = scale_of(n);                         /* 原本在迴圈裡每圈呼叫 scale_of(n) */
+for (int i = 0; i < n; i++) A[i] = (long)i * sc;
+
+/* 計時與比對 */
+static double now_ms(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6; }
+/* 先 memset 目標陣列再計時，避免把第一次碰記憶體（page fault）算進去；最後 memcmp 或比較總和確認兩版相同。 */
+/* -O 比較：gcc -O0 / -O2 / -O3 [-march=native] -Wall -Wextra -o a main.c 各跑一次 */
+
+@@@ S22
+【情境 S22：Git／GitLab 交卷流程與衝突救援】
+- 流程：git clone https://<GitLab網址>/<群組>/<專案>.git → cd → git config user.name/user.email → 改檔 → git add → git commit -m → git push origin main（分支名以 git branch 顯示為準）。
+- push 被拒（rejected, fetch first）＝遠端有新 commit：git pull --no-rebase origin main；有 CONFLICT 就打開檔案，刪掉 <<<<<<< ======= >>>>>>> 留下正確內容，git add → git commit → git push。
+- 救援：git status 看狀態；git diff 看改了什麼；git restore 檔名 丟掉未 commit 的修改；git log --oneline --graph 看歷史。不要用 push --force。
+- 已在本機用 bare repo 模擬遠端實測：製造衝突、解掉、push 成功，新 clone 拿到合併後內容。
+
+# 衝突檔長這樣（HEAD＝你的，下面＝遠端的）
+<<<<<<< HEAD
+int main(void){ puts("v2-from-A"); return 0; }
+=======
+int main(void){ puts("v2-from-B"); return 0; }
+>>>>>>> 6b1b3ec
+
+# 常用指令
+git clone https://<GitLab網址>/<群組>/<專案>.git
+git config user.name "你的名字"; git config user.email "你的信箱"
+git add main.c Makefile tests/
+git commit -m "說明"
+git push origin main
+git pull --no-rebase origin main
+git status --short
+git diff
+git restore main.c
+git log --oneline --graph | head
+
+# .gitignore 樣板（不要忽略 tests/*.out，那是答案檔）
+a.out
+*.o
+*.exe
+main
+build/
+.vscode/
+
+@@@ S23
+【情境 S23：Makefile 樣板＋自動測資比對腳本 test.sh】
+- Makefile 指令列開頭必須是 Tab，不能是空白（否則 missing separator）。
+- test.sh 跑 tests/*.in，輸出和同名 .out 用 diff -Z 比（忽略行尾空白），顯示 PASS/FAIL/TLE/RE 與毫秒；全過回傳 0。
+- 腳本第一次要 chmod +x test.sh，或用 bash test.sh 執行。
+- 實測：3 筆全 PASS；故意改錯一個 .out 會顯示 FAIL 和 diff 前 5 行。
+
+# ===== Makefile（指令列前面是 Tab）=====
+CC      = gcc
+CFLAGS  = -O2 -Wall -Wextra -std=gnu11
+LDFLAGS = -pthread
+TARGET  = main
+SRC     = main.c
+.PHONY: all run test clean
+all: $(TARGET)
+$(TARGET): $(SRC)
+	$(CC) $(CFLAGS) -o $@ $(SRC) $(LDFLAGS)
+run: $(TARGET)
+	./$(TARGET) < tests/1.in
+test: $(TARGET)
+	bash ./test.sh ./$(TARGET) tests
+clean:
+	rm -f $(TARGET) *.o
+
+# ===== test.sh =====
+#!/bin/bash
+BIN=${1:-./main}; DIR=${2:-tests}; TL=${TL:-2}
+pass=0; fail=0; tmp=$(mktemp)
+for in in "$DIR"/*.in; do
+    exp="${in%.in}.out"
+    t0=$(date +%s%N)
+    timeout "$TL" "$BIN" < "$in" > "$tmp"; rc=$?
+    ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+    if [ $rc -eq 124 ]; then echo "TLE   $in"; fail=$((fail+1))
+    elif [ $rc -ne 0 ]; then echo "RE    $in exit=$rc"; fail=$((fail+1))
+    elif diff -q -Z "$tmp" "$exp" > /dev/null; then echo "PASS  $in ${ms}ms"; pass=$((pass+1))
+    else echo "FAIL  $in ${ms}ms"; fail=$((fail+1)); diff -Z "$tmp" "$exp" | head -5
+    fi
+done
+rm -f "$tmp"; echo "---- $pass passed, $fail failed"; [ $fail -eq 0 ]
+
+@@@ S24
+【情境 S24：publisher／subscriber／processor 骨架（一支檔案選角色）】
+重點：python3 node.py pub|proc|sub；ROS 參數用 rclpy.utilities.remove_ros_args 濾掉再讀角色。
+陷阱1：Jazzy 按 Ctrl-C 會丟 ExternalShutdownException，要和 KeyboardInterrupt 一起 except，最後 rclpy.try_shutdown()，否則噴 Traceback。
+陷阱2：topic 用相對名稱（'number' 不加 /），加 --ros-args -r __ns:=/robot1 才會變 /robot1/number。
+陷阱3：create_publisher／create_subscription 第 3 個參數 QoS depth（10）必填；型別兩端要一樣。
+
+import sys
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from std_msgs.msg import Int32
+
+class Pub(Node):
+    def __init__(self):
+        super().__init__('number_publisher')
+        self.pub = self.create_publisher(Int32, 'number', 10)
+        self.count = 0
+        self.timer = self.create_timer(1.0, self.on_timer)
+    def on_timer(self):
+        msg = Int32(); msg.data = self.count
+        self.pub.publish(msg); self.count += 1
+
+class Proc(Node):
+    def __init__(self):
+        super().__init__('processor')
+        self.sub = self.create_subscription(Int32, 'number', self.on_msg, 10)
+        self.pub = self.create_publisher(Int32, 'double', 10)
+    def on_msg(self, msg):
+        out = Int32(); out.data = msg.data * 2
+        self.pub.publish(out)
+
+class Sub(Node):
+    def __init__(self):
+        super().__init__('double_listener')
+        self.sub = self.create_subscription(Int32, 'double', self.on_msg, 10)
+    def on_msg(self, msg):
+        self.get_logger().info(f'got {msg.data}')
+
+ROLES = {'pub': Pub, 'proc': Proc, 'sub': Sub}
+
+def main():
+    argv = rclpy.utilities.remove_ros_args(sys.argv)
+    role = argv[1] if len(argv) > 1 else 'pub'
+    rclpy.init(args=sys.argv)
+    node = ROLES[role]()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
+@@@ S25
+【情境 S25：service server／client（std_srvs SetBool、Trigger）】
+重點：ros-core 只有 std_srvs（Empty／SetBool／Trigger），沒有 example_interfaces 的 AddTwoInts。SetBool 請求 data(bool)，回應 success(bool)+message(str)；Trigger 請求沒欄位。
+陷阱1：server callback 一定要 return response，忘了 → server 噴 TypeError 當掉、client 等不到。
+陷阱2：client 用 call_async＋spin_until_future_complete（不要在 callback 裡用同步 call，會卡死）；先 wait_for_service。
+陷阱3：Ctrl-C 要 except (KeyboardInterrupt, ExternalShutdownException)＋rclpy.try_shutdown()；service 名稱用相對名稱，__ns 不同就找不到。
+
+import sys
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from std_srvs.srv import SetBool, Trigger
+
+class Server(Node):
+    def __init__(self):
+        super().__init__('robot_server')
+        self.enabled = False
+        self.create_service(SetBool, 'set_enable', self.on_set)
+        self.create_service(Trigger, 'get_status', self.on_get)
+    def on_set(self, req, res):
+        self.enabled = req.data
+        res.success = True; res.message = f'enabled={self.enabled}'
+        return res
+    def on_get(self, req, res):
+        res.success = self.enabled; res.message = f'enabled={self.enabled}'
+        return res
+
+class Client(Node):
+    def __init__(self):
+        super().__init__('robot_client')
+        self.cli = self.create_client(SetBool, 'set_enable')
+    def call(self, value):
+        if not self.cli.wait_for_service(timeout_sec=3.0):
+            return None
+        req = SetBool.Request(); req.data = value
+        fut = self.cli.call_async(req)
+        rclpy.spin_until_future_complete(self, fut, timeout_sec=3.0)
+        return fut.result() if fut.done() else None
+
+def main():
+    argv = rclpy.utilities.remove_ros_args(sys.argv)
+    role = argv[1] if len(argv) > 1 else 'server'
+    rclpy.init(args=sys.argv)
+    node = Server() if role == 'server' else Client()
+    try:
+        if role == 'server':
+            rclpy.spin(node)
+        else:
+            print(node.call(len(argv) < 3 or argv[2] == 'true'))
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
+@@@ S26
+【情境 S26：參數＋namespace＋remap，同一支程式開多台機器人】
+執行：python3 robot.py --ros-args -r __ns:=/robot1 -p speed:=2.0 ；改參數：ros2 param set /robot1/robot speed 5.0
+陷阱1：topic 用相對名稱（'status' 不加 /），__ns 才會套上變 /robot1/status；-r status:=state 可 remap 單一 topic。
+陷阱2：參數型別由 declare_parameter 預設值決定：1.0 是 double，-p speed:=2（整數）會 InvalidParameterTypeException，param set 給 5 也會失敗，要寫 5.0。
+陷阱3：timer 裡每次 get_parameter 重讀才會即時生效；Ctrl-C 要 except (KeyboardInterrupt, ExternalShutdownException)＋rclpy.try_shutdown()。
+
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from rcl_interfaces.msg import SetParametersResult
+from geometry_msgs.msg import Twist
+from std_msgs.msg import String
+
+class Robot(Node):
+    def __init__(self):
+        super().__init__('robot')
+        self.declare_parameter('speed', 1.0)
+        self.declare_parameter('robot_name', 'r')
+        self.add_on_set_parameters_callback(self.on_param)
+        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.status_pub = self.create_publisher(String, 'status', 10)
+        self.x = 0.0
+        self.timer = self.create_timer(1.0, self.on_timer)
+
+    def on_param(self, params):
+        for p in params:
+            if p.name == 'speed' and p.value < 0:
+                return SetParametersResult(successful=False, reason='speed 不能是負的')
+        return SetParametersResult(successful=True)
+
+    def on_timer(self):
+        speed = self.get_parameter('speed').value
+        self.x += speed
+        cmd = Twist(); cmd.linear.x = speed
+        self.cmd_pub.publish(cmd)
+        msg = String()
+        msg.data = f'{self.get_parameter("robot_name").value} speed={speed} x={self.x:.1f}'
+        self.status_pub.publish(msg)
+
+def main():
+    rclpy.init()
+    node = Robot()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
+@@@ S27
+【情境 S27：一鍵排查腳本 ros2_check.sh（收不到資料時）】
+用法：bash ros2_check.sh /double 8 → 印 node list、topic list -t、每個 topic pub/sub 數＋警告，再對 /double 做 info -v、echo --once、hz。
+判讀：pub=0 sub=1＋「名稱很像」→ 打錯字；pub=2 → 兩個 publisher 搶（hz 變 2 倍）；BEST_EFFORT 發 vs RELIABLE 收 → QoS 不相容（echo 收得到、程式收不到）。
+陷阱：程式裡用相對 topic 名，namespace 不同也會變成 pub=0／sub=0；Python 節點 Ctrl-C 要 except (KeyboardInterrupt, ExternalShutdownException)；hz 啟動要 3～5 秒，秒數給 8 以上。
+
+#!/usr/bin/env bash
+TOPIC="${1:-}"; SEC="${2:-8}"
+export PYTHONUNBUFFERED=1
+[ -z "$ROS_DISTRO" ] && source /opt/ros/jazzy/setup.bash
+ros2 topic list >/dev/null 2>&1; sleep 1
+echo "== node list"; ros2 node list
+echo "== topic list -t"; ros2 topic list -t
+echo "== pub/sub"
+TOPICS=$(ros2 topic list | grep -v -E '^/(rosout|parameter_events)$')
+for t in $TOPICS; do
+  ros2 topic info -v "$t" | awk -v T="$t" '
+    /^Publisher count/ {np=$3}  /^Subscription count/ {ns=$3}
+    /^Node name:/ {node=$3}     /^Endpoint type/ {ep=$3}
+    /Reliability:/ {if (ep=="PUBLISHER") pr[$2]=pr[$2]" "node; else sr[$2]=sr[$2]" "node}
+    END { printf "%-28s pub=%s sub=%s\n", T, np, ns
+      if (np==0 && ns>0) print "  ! 有人收沒人發：名稱打錯／namespace？"
+      if (np>=2) print "  ! " np " 個 publisher"
+      if (("BEST_EFFORT" in pr) && ("RELIABLE" in sr)) print "  ! QoS 不相容" }'
+done
+if [ -n "$TOPIC" ]; then
+  ros2 topic info -v "$TOPIC" | grep -E 'count|Node name|Reliability|Durability'
+  timeout -s INT 5 ros2 topic echo --once "$TOPIC" || echo "! 5 秒沒收到"
+  HZ=$(timeout -s INT "$SEC" ros2 topic hz "$TOPIC" 2>&1 | grep 'average rate' | tail -1)
+  echo "${HZ:-! 量不到頻率}"
+fi
+
+@@@ S28
+【情境 S28：多機器人派單 dispatcher】
+介面：機器人 -r __ns:=/robotK 啟動，內部用相對名稱 status(String "IDLE x y"／"BUSY T3 x y")、goal(PoseStamped，frame_id=任務編號)、done(String 任務編號)。
+陷阱1：callback 別 sleep，用 timer 狀態機；迴圈 lambda 要寫 lambda m, n=n:，否則全綁最後一台。
+陷阱2：dispatcher 無 namespace，用絕對名 f'/{n}/goal'；Ctrl-C：except (KeyboardInterrupt, ExternalShutdownException)＋rclpy.try_shutdown()。
+
+import math
+from collections import deque
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import String
+
+class Dispatcher(Node):
+    def __init__(self):
+        super().__init__('dispatcher')
+        self.pending = deque([('T1', 2.0, 0.0), ('T2', 0.0, 3.0), ('T3', 5.0, 5.0)])
+        self.total, self.done, self.finished, self.R = len(self.pending), 0, False, {}
+        for n in ['robot1', 'robot2', 'robot3']:
+            self.R[n] = {'online': False, 'pos': (0.0, 0.0), 'task': None,
+                         'pub': self.create_publisher(PoseStamped, f'/{n}/goal', 10)}
+            self.create_subscription(String, f'/{n}/status', lambda m, n=n: self.on_status(n, m), 10)
+            self.create_subscription(String, f'/{n}/done', lambda m, n=n: self.on_done(n, m), 10)
+        self.create_timer(0.2, self.tick)
+
+    def on_status(self, n, m):
+        p = m.data.split()
+        self.R[n].update(online=True, pos=(float(p[-2]), float(p[-1])))
+
+    def on_done(self, n, m):
+        if self.R[n]['task'] == m.data:
+            self.R[n]['task'] = None
+            self.done += 1
+
+    def tick(self):
+        while self.pending:
+            idle = [n for n, r in self.R.items() if r['online'] and r['task'] is None]
+            if not idle:
+                break
+            t = self.pending.popleft()
+            n = min(idle, key=lambda k: math.dist(self.R[k]['pos'], t[1:]))
+            g = PoseStamped()
+            g.header.frame_id = t[0]
+            g.pose.position.x, g.pose.position.y = t[1], t[2]
+            self.R[n]['pub'].publish(g)
+            self.R[n]['task'] = t[0]
+        self.finished = self.done == self.total
+
+def main():
+    rclpy.init()
+    node = Dispatcher()
+    try:
+        while rclpy.ok() and not node.finished:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
+@@@ S29
+【情境 S29：同一 node 的 pub＋sub＋timer＋統計（筆數、Hz、遺失）＋QoS】
+重點：用遞增序號 Int32 判斷遺失：收到 s > last+1 → 遺失 s-last-1 筆；s <= last → 亂序／重複。每 report 秒印統計。
+QoS：發 BEST_EFFORT＋收 RELIABLE 不相容（0 筆，rclpy 會 WARN incompatible QoS）；發 RELIABLE＋收 BEST_EFFORT 可以；TRANSIENT_LOCAL 兩端都設，晚到的訂閱者會先拿到最後 depth 筆。
+陷阱：topic 用相對名稱（__ns 才分得開）；Ctrl-C 要 except (KeyboardInterrupt, ExternalShutdownException)＋rclpy.try_shutdown()。
+
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from std_msgs.msg import Int32
+
+class Stats(Node):
+    def __init__(self):
+        super().__init__('stats')
+        qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10,
+                         reliability=ReliabilityPolicy.RELIABLE,      # 或 BEST_EFFORT
+                         durability=DurabilityPolicy.VOLATILE)        # 或 TRANSIENT_LOCAL
+        self.pub = self.create_publisher(Int32, 'seq', qos)
+        self.create_subscription(Int32, 'seq', self.on_msg, qos)
+        self.create_timer(0.1, self.on_pub)      # 10 Hz
+        self.create_timer(2.0, self.on_report)   # 每 2 秒統計
+        self.seq = 0
+        self.total = self.lost = self.ooo = self.win = 0
+        self.first = self.last = None
+        self.t0 = self.now()
+
+    def now(self):
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def on_pub(self):
+        self.seq += 1
+        msg = Int32(); msg.data = self.seq
+        self.pub.publish(msg)
+
+    def on_msg(self, msg):
+        s = msg.data
+        self.total += 1; self.win += 1
+        if self.first is None:
+            self.first = self.last = s
+        elif s > self.last:
+            self.lost += s - self.last - 1
+            self.last = s
+        else:
+            self.ooo += 1
+
+    def on_report(self):
+        t = self.now()
+        hz = self.win / (t - self.t0)
+        self.get_logger().info(f'收到 {self.total}｜{hz:.1f} Hz｜序號 {self.first}~{self.last}'
+                               f'｜遺失 {self.lost}｜亂序 {self.ooo}')
+        self.win, self.t0 = 0, t
+
+def main():
+    rclpy.init()
+    node = Stats()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
+@@@ S30
+【情境 S30：Action client／server 骨架（nav2_msgs/action/NavigateToPose）】未實測：練習 image 沒有任何 action 型別
+先查：ros2 interface list -a；ros2 interface show nav2_msgs/action/NavigateToPose；ros2 action list -t。Goal=pose(PoseStamped)＋behavior_tree；Feedback 有 current_pose、distance_remaining 等。
+陷阱1：execute_callback 結尾要 goal_handle.succeed() 再 return Result()，沒 succeed 會變 ABORTED；要能 cancel 用 MultiThreadedExecutor＋ReentrantCallbackGroup。
+陷阱2：client 用 send_goal_async＋spin_until_future_complete，先確認 accepted 再 get_result_async。action 名稱用相對名稱，__ns 會套上；Ctrl-C 要 except (KeyboardInterrupt, ExternalShutdownException)＋rclpy.try_shutdown()。
+
+import sys
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException
+from action_msgs.msg import GoalStatus
+from nav2_msgs.action import NavigateToPose
+
+class NavClient(Node):
+    def __init__(self):
+        super().__init__('nav_client')
+        self.client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+    def go(self, x, y):
+        if not self.client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error('找不到 action server')
+            return False
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.header.stamp = self.get_clock().now().to_msg()
+        goal.pose.pose.position.x, goal.pose.pose.position.y = x, y
+        goal.pose.pose.orientation.w = 1.0
+        f = self.client.send_goal_async(goal, feedback_callback=self.on_fb)
+        rclpy.spin_until_future_complete(self, f)
+        handle = f.result()
+        if not handle.accepted:
+            return False
+        rf = handle.get_result_async()
+        rclpy.spin_until_future_complete(self, rf, timeout_sec=60.0)
+        if not rf.done():
+            handle.cancel_goal_async()
+            return False
+        return rf.result().status == GoalStatus.STATUS_SUCCEEDED
+
+    def on_fb(self, msg):
+        self.get_logger().info(f'剩 {msg.feedback.distance_remaining:.2f} m')
+
+def main():
+    argv = rclpy.utilities.remove_ros_args(sys.argv)
+    rclpy.init(args=sys.argv)
+    node = NavClient()
+    try:
+        ok = node.go(float(argv[1]), float(argv[2]))
+        print('成功' if ok else '失敗')
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.try_shutdown()
+
+if __name__ == '__main__':
+    main()
+
